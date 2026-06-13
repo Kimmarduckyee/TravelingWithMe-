@@ -669,7 +669,7 @@ window.copyCode=function(){
 }
 window.copyInviteMsg=function(){
   const name=document.getElementById('invite-name').value||'친구';
-  const msg=`${name}야! 나랑 같이 여행 계획 짜자~! 🌏\nTravelingWithMe!에서 코드 입력해줘: ${project.code} /n사이트 주소: (https://kimmarduckyee.github.io/TravelingWithMe-/) /n사용방법:https://happyhobby.creatorlink.net/forum/view/1489773`;
+  const msg = `${name}야! 나랑 같이 여행 계획 짜자~! 🌏\nTravelingWithMe!에서 코드 입력해줘: ${project.code}\n\n사이트 주소: https://kimmarduckyee.github.io/TravelingWithMe-/\n사용방법: https://happyhobby.creatorlink.net/forum/view/1489773`;
   navigator.clipboard.writeText(msg).catch(()=>{});
   showToast('📤 초대 메시지 복사!');
 }
