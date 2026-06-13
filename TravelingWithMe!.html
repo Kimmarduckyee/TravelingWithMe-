@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🌏 여행 플래너</title>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, update, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDZJoUYpHGdeH1e98y905Ne3lVLPorBUkI",
+  authDomain: "travelingwithme.firebaseapp.com",
+  databaseURL: "https://travelingwithme-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "travelingwithme",
+  storageBucket: "travelingwithme.firebasestorage.app",
+  messagingSenderId: "382618235381",
+  appId: "1:382618235381:web:15b9395310fd10e945b0bc",
+  measurementId: "G-H3GLLB1X53"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// ══ STATE ══
+let project = null;
+let projectCode = null;
+let dbListener = null;
+let isRemoteUpdate = false;
+let tagData = { members: [], themes: [] };
+let accTempNotes = [], accTempPhotos = [];
+let funTempPhotos = [];
+let editingAccIdx = null, editingFunIdx = null;
+let miniBarState = {};
+let dragAccIdx = null;
+
+// ══ HELPERS ══
+function genCode() {
+  const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = 'TRIP-';
+  for(let i=0;i<4;i++) s += c[Math.floor(Math.random()*c.length)];
+  return s;
+}
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2800);
+}
+
+// ══ SOUND EFFECTS ══
+const soundCtx = { ctx: null };
+function getAudioCtx() {
+  if (!soundCtx.ctx) soundCtx.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return soundCtx.ctx;
+}
+window.playSound = function playSound(type) {
+  try {
+    const ctx = getAudioCtx();
+    const now = ctx.currentTime;
+    const sounds = {
+      pop: () => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(600, now);
+        osc.frequency.exponentialRampToValueAtTime(900, now + 0.06);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        osc.start(now); osc.stop(now + 0.12);
+      },
+      save: () => {
+        [0, 0.1, 0.2].forEach((delay, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.type = 'triangle';
+          const freqs = [523, 659, 784];
+          osc.frequency.setValueAtTime(freqs[i], now + delay);
+          gain.gain.setValueAtTime(0.18, now + delay);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.15);
+          osc.start(now + delay); osc.stop(now + delay + 0.15);
+        });
+      },
+      click: () => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, now);
+        osc.frequency.exponentialRampToValueAtTime(800, now + 0.05);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+        osc.start(now); osc.stop(now + 0.08);
+      },
+      coin: () => {
+        [0, 0.08].forEach((delay, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(i === 0 ? 988 : 1319, now + delay);
+          gain.gain.setValueAtTime(0.12, now + delay);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.18);
+          osc.start(now + delay); osc.stop(now + delay + 0.18);
+        });
+      },
+      travel: () => {
+        const freqs = [440, 550, 660, 880];
+        freqs.forEach((f, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(f, now + i * 0.07);
+          gain.gain.setValueAtTime(0.15, now + i * 0.07);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.07 + 0.2);
+          osc.start(now + i * 0.07); osc.stop(now + i * 0.07 + 0.2);
+        });
+      }
+    };
+    if (sounds[type]) sounds[type]();
+  } catch(e) {}
+}
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.body.classList.toggle('travel-mode', id.includes('travel'));
+}
+function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+// ══ DB ══
+function dbPath(code) { return ref(db, 'projects/' + code); }
+
+async function saveProject() {
+  if(!project || !projectCode) return;
+  isRemoteUpdate = true;
+  try {
+    await set(dbPath(projectCode), project);
+  } catch(e) { showToast('⚠️ 저장 실패: ' + e.message); }
+  setTimeout(() => isRemoteUpdate = false, 500);
+}
+
+function attachListener(code) {
+  if(dbListener) off(dbListener);
+  const r = ref(db, 'projects/' + code);
+  dbListener = r;
+  onValue(r, snap => {
+    if(isRemoteUpdate) return;
+    const data = snap.val();
+    if(!data) return;
+    project = data;
+    refreshAll();
+    showToast('🔄 실시간 업데이트!');
+  });
+}
+
+function refreshAll() {
+  updateAllHeaders();
+  refreshInfoBar();
+  refreshTravelInfoBar();
+  refreshMiniBar();
+  // re-render current visible sub if needed
+  const active = document.querySelector('.screen.active');
+  if(!active) return;
+  const id = active.id;
+  if(id==='sub-acc') renderAccList();
+  if(id==='sub-fun') renderFunList();
+  if(id==='sub-schedule') renderScheduleList();
+  if(id==='sub-compare') renderCompare();
+  if(id==='sub-pack') renderPackList();
+  if(id==='sub-travel-summary') renderTravelSummary();
+  if(id==='sub-travel-schedule') renderTravelSchedule();
+  if(id==='sub-travel-random') renderRandomList();
+  if(id==='sub-travel-acc') renderTravelAcc();
+  if(id==='sub-memo' && project) { const m = document.getElementById('memo-text'); if(m) m.value = project.memo||''; }
+}
+
+// ══ CREATE ══
+window.createProject = async function() {
+  const name = document.getElementById('c-name').value.trim();
+  const start = document.getElementById('c-start').value;
+  const end = document.getElementById('c-end').value;
+  const pw = document.getElementById('c-pw').value;
+  if(!name) { showToast('여행 이름을 입력해주세요!'); return; }
+  const code = genCode();
+  const newProject = {
+    name, code, password: pw, start, end,
+    place:'', members:[], transport:'', themes:[],
+    accommodations:[], funList:[], schedule:[],
+    memo:'', packList:[], outfit:'', outfitMemo:''
+  };
+  try {
+    await set(ref(db, 'projects/' + code), newProject);
+    project = newProject;
+    projectCode = code;
+    attachListener(code);
+    enterProject();
+    showToast('🎉 프로젝트 생성 완료! 코드: ' + code);
+  } catch(e) { showToast('⚠️ 생성 실패: ' + e.message); }
+}
+
+// ══ JOIN ══
+window.joinProject = async function() {
+  const code = document.getElementById('j-code').value.trim().toUpperCase();
+  const pw = document.getElementById('j-pw').value;
+  if(!code) { showToast('코드를 입력해주세요!'); return; }
+  showToast('🔍 프로젝트 찾는 중...');
+  try {
+    const snap = await get(ref(db, 'projects/' + code));
+    if(!snap.exists()) { showToast('❌ 존재하지 않는 코드예요!'); return; }
+    const data = snap.val();
+    if(data.password && data.password !== pw) {
+      showToast('🔒 비밀번호가 틀렸어요!'); return;
+    }
+    project = data;
+    projectCode = code;
+    attachListener(code);
+    enterProject();
+    showToast('✅ 참여 완료!');
+  } catch(e) { showToast('⚠️ 오류: ' + e.message); }
+}
+
+function enterProject() {
+  updateAllHeaders();
+  refreshInfoBar();
+  refreshTravelInfoBar();
+  showMain('plan');
+}
+
+// ══ INFO BAR ══
+function refreshInfoBar() {
+  if(!project) return;
+  const d = project.start ? `${project.start}${project.end?' ~ '+project.end:''}` : '날짜 미정';
+  setText('ib-dates', d); setText('ib-place', project.place||'장소 미정');
+  setText('ib-members', (project.members||[]).join(', ')||'구성원 미정');
+  setText('ib-transport', project.transport||'이동수단 미정');
+  setText('ib-theme', (project.themes||[]).join(' · ')||'테마 미정');
+  setText('ib-budget', project.budget||'예산 미정');
+}
+function refreshTravelInfoBar() {
+  if(!project) return;
+  const d = project.start ? `${project.start}${project.end?' ~ '+project.end:''}` : '날짜 미정';
+  setText('tib-dates',d); setText('tib-place',project.place||'장소 미정');
+  setText('tib-members',(project.members||[]).join(', ')||'구성원 미정');
+  setText('tib-transport',project.transport||'이동수단 미정');
+}
+function refreshMiniBar() {
+  if(!project) return;
+  const d = project.start ? `${project.start}${project.end?' ~ '+project.end:''}` : '날짜 미정';
+  const pl = project.place||'장소 미정';
+  const mem = (project.members||[]).join(', ')||'구성원 미정';
+  const map = {
+    'mini-dates':'📅 '+d,'mini-place':'📍 '+pl,'mini-members':'👥 '+mem,
+    'acc-mini-dates':'📅 '+d,'acc-mini-place':'📍 '+pl,
+    'sched-mini-dates':'📅 '+d,'fun-mini-dates':'📅 '+d,'fun-mini-place':'📍 '+pl,
+    'cmp-mini-dates':'📅 '+d,'tsumm-mini':'📅 '+d,'tsched-mini':'📅 '+d,'tacc-mini':'📅 '+d
+  };
+  Object.entries(map).forEach(([k,v]) => setText(k,v));
+}
+function setText(id, val) { const el=document.getElementById(id); if(el) el.textContent=val; }
+function updateAllHeaders() {
+  if(!project) return;
+  ['plan-header-title','sub-acc-proj-title','sub-fun-proj-title'].forEach(id => setText(id,'✈️ '+project.name));
+  setText('travel-header-title','🧳 '+project.name);
+  setText('plan-code-badge', project.code+' 📋');
+  setText('travel-code-badge', project.code+' 📋');
+  setText('share-code-display', project.code);
+}
+window.toggleMiniBar = function(sid) {
+  const scr = document.getElementById(sid);
+  if(!scr) return;
+  const bar = scr.querySelector('.info-bar-mini');
+  if(!bar) return;
+  const btn = bar.querySelector('.mini-toggle-btn');
+  const chips = bar.querySelectorAll('.info-chip-mini');
+  miniBarState[sid] = !miniBarState[sid];
+  if(miniBarState[sid]) {
+    chips.forEach(c=>c.style.display='none');
+    if(btn) btn.textContent='﹀';
+    bar.style.padding='2px 0 4px'; bar.style.borderTop='none';
+  } else {
+    chips.forEach(c=>c.style.display='');
+    if(btn) btn.textContent='︿';
+    bar.style.padding=''; bar.style.borderTop='';
+  }
+}
+
+// ══ NAV ══
+window.showMain = function(mode) {
+  if(mode==='plan') { showScreen('screen-plan-main'); refreshInfoBar(); }
+  else { showScreen('screen-travel-main'); refreshTravelInfoBar(); }
+}
+window.switchMode = function(to) { showMain(to==='travel'?'travel':'plan'); }
+window.showScreen = showScreen;
+window.showSub = function(id) {
+  showScreen(id);
+  refreshMiniBar();
+  if(id==='sub-info') loadBasicInfo();
+  if(id==='sub-acc') renderAccList();
+  if(id==='sub-fun') renderFunList();
+  if(id==='sub-schedule') renderScheduleList();
+  if(id==='sub-compare') renderCompare();
+  if(id==='sub-memo' && project) document.getElementById('memo-text').value = project.memo||'';
+  if(id==='sub-pack') renderPackList();
+  if(id==='sub-travel-summary') renderTravelSummary();
+  if(id==='sub-travel-schedule') renderTravelSchedule();
+  if(id==='sub-travel-random') renderRandomList();
+  if(id==='sub-travel-acc') renderTravelAcc();
+}
+
+// ══ BASIC INFO ══
+window.addTag = function(e,key,inputId) { if(e.key==='Enter') window.addTagBtn(key,inputId); }
+window.addTagBtn = function(key,inputId) {
+  const inp=document.getElementById(inputId);
+  const v=inp.value.trim(); if(!v) return;
+  tagData[key].push(v); inp.value=''; renderTags(key);
+}
+function renderTags(key) {
+  const list=document.getElementById('tag-'+key);
+  if(!list) return;
+  list.innerHTML=tagData[key].map((t,i)=>`<div class="tag">${t}<span class="rm" onclick="removeTag('${key}',${i})">×</span></div>`).join('');
+}
+window.removeTag=function(key,i){ tagData[key].splice(i,1); renderTags(key); }
+
+function loadBasicInfo() {
+  if(!project) return;
+  setValue('f-place',project.place||'');
+  setValue('f-start',project.start||'');
+  setValue('f-end',project.end||'');
+  setValue('f-transport',project.transport||'');
+  setValue('f-budget',project.budget||'');
+  tagData.members=[...(project.members||[])];
+  tagData.themes=[...(project.themes||[])];
+  renderTags('members'); renderTags('themes');
+}
+function setValue(id,v){ const el=document.getElementById(id); if(el) el.value=v; }
+
+window.saveBasicInfo = async function() {
+  if(!project) return;
+  project.place=document.getElementById('f-place').value;
+  project.start=document.getElementById('f-start').value;
+  project.end=document.getElementById('f-end').value;
+  project.transport=document.getElementById('f-transport').value;
+  project.budget=document.getElementById('f-budget').value;
+  project.members=[...tagData.members];
+  project.themes=[...tagData.themes];
+  playSound('save');
+  await saveProject();
+  refreshInfoBar(); refreshTravelInfoBar(); refreshMiniBar(); updateAllHeaders();
+  setText('status-info','✅ 저장됨');
+  document.getElementById('status-info').className='card-status done';
+  showToast('✅ 기본 정보 저장!');
+  showMain('plan');
+}
+
+// ══ ACCOMMODATION ══
+window.openAccModal = function(idx) {
+  editingAccIdx = idx!=null ? idx : null;
+  accTempNotes=[]; accTempPhotos=[];
+  setValue('acc-name',''); setValue('acc-price',''); setValue('acc-link','');
+  document.getElementById('acc-note-tags').innerHTML='';
+  document.getElementById('acc-photo-list').innerHTML='';
+  setValue('acc-photo-url','');
+  if(idx!=null) {
+    const a=project.accommodations[idx];
+    setValue('acc-name',a.name); setValue('acc-price',a.price||''); setValue('acc-link',a.link||'');
+    accTempNotes=[...a.notes]; accTempPhotos=[...(a.photos||[])];
+    renderAccNoteTags(); renderAccPhotoList();
+  }
+  document.getElementById('modal-acc').classList.remove('hidden');
+}
+window.addAccNote=function(e){ if(e.key==='Enter') window.addAccNoteBtn(); }
+window.addAccNoteBtn=function(){
+  if(accTempNotes.length>=5){ showToast('특이사항은 최대 5개!'); return; }
+  const v=document.getElementById('acc-note-input').value.trim(); if(!v) return;
+  accTempNotes.push(v); document.getElementById('acc-note-input').value=''; renderAccNoteTags();
+}
+function renderAccNoteTags(){
+  document.getElementById('acc-note-tags').innerHTML=accTempNotes.map((n,i)=>
+    `<div class="tag">${n}<span class="rm" onclick="removeAccNote(${i})">×</span></div>`).join('');
+}
+window.removeAccNote=function(i){ accTempNotes.splice(i,1); renderAccNoteTags(); }
+
+window.addAccPhotoUrl=function(){
+  const v=document.getElementById('acc-photo-url').value.trim(); if(!v){ showToast('URL을 입력해주세요!'); return; }
+  if(accTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
+  accTempPhotos.push(v); document.getElementById('acc-photo-url').value=''; renderAccPhotoList();
+}
+function renderAccPhotoList(){
+  document.getElementById('acc-photo-list').innerHTML=accTempPhotos.map((p,i)=>`
+    <div class="photo-item">
+      <img src="${p}" onerror="this.src=''" style="width:70px;height:60px;object-fit:cover;border-radius:10px;">
+      <button class="rm-photo" onclick="removeAccPhoto(${i})">×</button>
+    </div>`).join('');
+}
+window.removeAccPhoto=function(i){ accTempPhotos.splice(i,1); renderAccPhotoList(); }
+
+window.saveAccommodation = async function() {
+  const name=document.getElementById('acc-name').value.trim();
+  if(!name){ showToast('숙소 이름을 입력해주세요!'); return; }
+  const acc={ name, price:document.getElementById('acc-price').value, link:document.getElementById('acc-link').value, notes:[...accTempNotes], photos:[...accTempPhotos], confirmed:false };
+  if(!project.accommodations) project.accommodations=[];
+  if(editingAccIdx!=null) { acc.confirmed=project.accommodations[editingAccIdx].confirmed; project.accommodations[editingAccIdx]=acc; }
+  else project.accommodations.push(acc);
+  await saveProject();
+  closeModal('modal-acc'); renderAccList(); updateStatusBadge('acc');
+}
+
+function renderAccList(){
+  const list=document.getElementById('acc-list');
+  if(!project.accommodations||!project.accommodations.length){ list.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">아직 등록된 숙소가 없어요 🏨</div>'; return; }
+  list.innerHTML=project.accommodations.map((a,i)=>`
+    <div class="acc-card ${a.confirmed?'confirmed':''}" draggable="true" ondragstart="dragAcc(${i})" ondragover="event.preventDefault()" ondrop="dropAcc(event,${i})">
+      <div style="display:flex;gap:6px;align-items:flex-start;">
+        <span class="drag-handle">⠿</span>
+        <div style="flex:1">
+          <div class="acc-card-header">
+            <div class="acc-card-title">${a.confirmed?'✅ ':''} ${a.name}</div>
+            <div class="acc-card-price">${a.price||'-'}</div>
+          </div>
+          ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
+          ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
+          ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+        </div>
+      </div>
+      <div class="acc-actions">
+        <button class="acc-btn ${a.confirmed?'acc-btn-confirm confirmed':'acc-btn-confirm'}" onclick="toggleConfirmAcc(${i})">${a.confirmed?'✅ 확정됨':'확정하기'}</button>
+        <button class="acc-btn acc-btn-edit" onclick="openAccModal(${i})">수정</button>
+        <button class="acc-btn acc-btn-del" onclick="deleteAcc(${i})">삭제</button>
+      </div>
+    </div>`).join('');
+}
+window.dragAcc=function(i){ dragAccIdx=i; }
+window.dropAcc=async function(e,i){
+  if(dragAccIdx==null||dragAccIdx===i) return;
+  const arr=project.accommodations;
+  const tmp=arr.splice(dragAccIdx,1)[0]; arr.splice(i,0,tmp);
+  await saveProject(); renderAccList();
+}
+window.toggleConfirmAcc=async function(i){
+  project.accommodations[i].confirmed=!project.accommodations[i].confirmed;
+  await saveProject(); renderAccList();
+}
+window.deleteAcc=async function(i){ project.accommodations.splice(i,1); await saveProject(); renderAccList(); updateStatusBadge('acc'); }
+
+// ══ FUN LIST ══
+window.openFunModal=function(idx){
+  editingFunIdx=idx!=null?idx:null;
+  funTempPhotos=[];
+  setValue('fun-name',''); setValue('fun-link',''); setValue('fun-memo','');
+  document.getElementById('fun-photo-list').innerHTML='';
+  setValue('fun-photo-url','');
+  if(idx!=null){
+    const f=project.funList[idx];
+    setValue('fun-name',f.name); setValue('fun-link',f.link||''); setValue('fun-memo',f.memo||'');
+    funTempPhotos=[...(f.photos||[])]; renderFunPhotoList();
+  }
+  document.getElementById('modal-fun').classList.remove('hidden');
+}
+window.addFunPhotoUrl=function(){
+  const v=document.getElementById('fun-photo-url').value.trim(); if(!v){ showToast('URL을 입력해주세요!'); return; }
+  if(funTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
+  funTempPhotos.push(v); document.getElementById('fun-photo-url').value=''; renderFunPhotoList();
+}
+function renderFunPhotoList(){
+  document.getElementById('fun-photo-list').innerHTML=funTempPhotos.map((p,i)=>`
+    <div class="photo-item">
+      <img src="${p}" onerror="this.src=''" style="width:70px;height:60px;object-fit:cover;border-radius:10px;">
+      <button class="rm-photo" onclick="removeFunPhoto(${i})">×</button>
+    </div>`).join('');
+}
+window.removeFunPhoto=function(i){ funTempPhotos.splice(i,1); renderFunPhotoList(); }
+
+window.saveFun=async function(){
+  const name=document.getElementById('fun-name').value.trim();
+  if(!name){ showToast('놀거리 이름을 입력해주세요!'); return; }
+  const fun={ name, link:document.getElementById('fun-link').value, memo:document.getElementById('fun-memo').value, photos:[...funTempPhotos] };
+  if(!project.funList) project.funList=[];
+  if(editingFunIdx!=null) project.funList[editingFunIdx]=fun;
+  else project.funList.push(fun);
+  await saveProject(); closeModal('modal-fun'); renderFunList(); updateStatusBadge('fun');
+}
+
+function renderFunList(){
+  const list=document.getElementById('fun-list');
+  if(!project.funList||!project.funList.length){ list.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">아직 등록된 놀거리가 없어요 🎡</div>'; return; }
+  list.innerHTML=project.funList.map((f,i)=>`
+    <div class="acc-card">
+      <div class="acc-card-header"><div class="acc-card-title">🎡 ${f.name}</div></div>
+      ${f.link?`<a class="acc-card-link" href="${f.link}" target="_blank">🔗 참고 사이트</a>`:''}
+      ${f.memo?`<div style="font-size:13px;color:#777;margin-top:8px;line-height:1.5;">${f.memo}</div>`:''}
+      ${(f.photos||[]).length?`<div class="acc-photos">${f.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+      <div class="acc-actions">
+        <button class="acc-btn acc-btn-edit" onclick="openFunModal(${i})">수정</button>
+        <button class="acc-btn acc-btn-del" onclick="deleteFun(${i})">삭제</button>
+      </div>
+    </div>`).join('');
+}
+window.deleteFun=async function(i){ project.funList.splice(i,1); await saveProject(); renderFunList(); updateStatusBadge('fun'); }
+
+// ══ SCHEDULE ══
+window.addScheduleDay=async function(){
+  if(!project.schedule) project.schedule=[];
+  const dayNum=project.schedule.length+1;
+  const dateStr=project.start?addDays(project.start,dayNum-1):`Day ${dayNum}`;
+  project.schedule.push({label:dateStr,items:[]});
+  await saveProject(); renderScheduleList();
+}
+function addDays(dateStr,days){ const d=new Date(dateStr); d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
+
+function renderScheduleList(){
+  const list=document.getElementById('schedule-list');
+  if(!project.schedule||!project.schedule.length){ list.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">날짜를 추가해보세요! ➕</div>'; return; }
+  list.innerHTML=project.schedule.map((day,di)=>`
+    <div class="schedule-day">
+      <div class="schedule-day-header">
+        <div class="schedule-day-title">📅 ${day.label}</div>
+        <button class="acc-btn acc-btn-del" onclick="deleteDay(${di})">삭제</button>
+      </div>
+      ${(day.items||[]).map((item,ii)=>`
+        <div class="schedule-item">
+          <span class="schedule-time">${item.time}</span>
+          <span class="schedule-text">${item.text}</span>
+          <button style="background:none;border:none;color:#ddd;cursor:pointer;" onclick="deleteSchedItem(${di},${ii})">×</button>
+        </div>`).join('')}
+      <div class="add-item-row">
+        <input type="time" id="stime-${di}" style="width:90px;">
+        <input type="text" id="stext-${di}" placeholder="일정 입력">
+        <button class="small-btn" onclick="addSchedItem(${di})">추가</button>
+      </div>
+    </div>`).join('');
+  setText('status-schedule', project.schedule.length+'일');
+}
+window.addSchedItem=async function(di){
+  const time=document.getElementById(`stime-${di}`).value||'??:??';
+  const text=document.getElementById(`stext-${di}`).value.trim(); if(!text) return;
+  project.schedule[di].items.push({time,text});
+  await saveProject(); renderScheduleList();
+}
+window.deleteSchedItem=async function(di,ii){ project.schedule[di].items.splice(ii,1); await saveProject(); renderScheduleList(); }
+window.deleteDay=async function(di){ project.schedule.splice(di,1); await saveProject(); renderScheduleList(); }
+
+// ══ COMPARE ══
+function renderCompare(){
+  const el=document.getElementById('compare-content');
+  if(!project.accommodations||!project.accommodations.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 숙소가 없어요 🏨</div>'; return; }
+  el.innerHTML=`<div style="overflow-x:auto;"><table class="compare-table">
+    <thead><tr><th>숙소명</th><th>가격</th><th>특이사항</th><th>링크</th></tr></thead>
+    <tbody>${project.accommodations.map(a=>`<tr>
+      <td style="font-weight:700;text-align:left;">${a.confirmed?'✅ ':''} ${a.name}</td>
+      <td>${a.price||'-'}</td>
+      <td style="text-align:left;">${(a.notes||[]).slice(0,3).join(', ')||'-'}</td>
+      <td>${a.link?`<a href="${a.link}" target="_blank" style="color:#4A90D9;">링크</a>`:'-'}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+// ══ MEMO ══
+window.saveMemo=async function(){
+  if(!project) return;
+  project.memo=document.getElementById('memo-text').value;
+  await saveProject();
+  setText('status-memo', project.memo?'✅ 작성됨':'비어있음');
+}
+
+// ══ PACKING ══
+window.addPackItem=function(e){ if(e.key==='Enter') window.addPackItemBtn(); }
+window.addPackItemBtn=async function(){
+  const v=document.getElementById('pack-input').value.trim(); if(!v) return;
+  if(!project.packList) project.packList=[];
+  project.packList.push({text:v,done:false});
+  document.getElementById('pack-input').value='';
+  await saveProject(); renderPackList();
+}
+function renderPackList(){
+  const list=document.getElementById('pack-list');
+  if(!project.packList) project.packList=[];
+  list.innerHTML=project.packList.map((p,i)=>`
+    <div class="check-item">
+      <input type="checkbox" id="pack-${i}" ${p.done?'checked':''} onchange="togglePack(${i})">
+      <label for="pack-${i}" class="${p.done?'done':''}">${p.text}</label>
+      <button class="del-check" onclick="deletePack(${i})">×</button>
+    </div>`).join('');
+  setText('status-pack', project.packList.length+'개');
+}
+window.togglePack=async function(i){ project.packList[i].done=!project.packList[i].done; await saveProject(); renderPackList(); }
+window.deletePack=async function(i){ project.packList.splice(i,1); await saveProject(); renderPackList(); }
+
+// ══ OUTFIT ══
+window.selectOutfit=async function(el,key){
+  document.querySelectorAll('.outfit-card').forEach(c=>c.classList.remove('selected'));
+  el.classList.add('selected');
+  if(project){ project.outfit=key; setText('status-outfit', el.querySelector('.outfit-label').textContent); await saveProject(); }
+}
+window.saveOutfit=async function(){
+  if(project){ project.outfitMemo=document.getElementById('outfit-memo').value; await saveProject(); showToast('👗 저장!'); }
+}
+
+// ══ TRAVEL ══
+function renderTravelSummary(){
+  const el=document.getElementById('travel-summary-content');
+  const p=project;
+  const confirmed=(p.accommodations||[]).find(a=>a.confirmed);
+  el.innerHTML=`
+    <div class="confirmed-display"><div class="confirmed-label">📅 여행 기간</div><div class="confirmed-value">${p.start||'미정'} ${p.end?'~ '+p.end:''}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">📍 여행지</div><div class="confirmed-value">${p.place||'미정'}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">👥 구성원</div><div class="confirmed-value">${(p.members||[]).join(', ')||'미정'}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">🚗 이동수단</div><div class="confirmed-value">${p.transport||'미정'}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">🎨 여행 테마</div><div class="confirmed-value">${(p.themes||[]).join(' · ')||'미정'}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">💰 예산</div><div class="confirmed-value">${p.budget||'미정'}</div></div>
+    <div class="confirmed-display"><div class="confirmed-label">🏨 확정 숙소</div><div class="confirmed-value">${confirmed?confirmed.name:'미확정'}</div>${confirmed&&confirmed.price?`<div class="confirmed-sub">💰 ${confirmed.price}</div>`:''}</div>
+    <div class="confirmed-display"><div class="confirmed-label">👗 옷차림 컨셉</div><div class="confirmed-value">${p.outfit||'미정'}</div><div class="confirmed-sub">${p.outfitMemo||''}</div></div>`;
+}
+function renderTravelSchedule(){
+  const el=document.getElementById('travel-schedule-content');
+  if(!project.schedule||!project.schedule.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 일정이 없어요 📅</div>'; return; }
+  el.innerHTML=project.schedule.map(day=>`
+    <div class="schedule-day">
+      <div class="schedule-day-title" style="margin-bottom:10px;">📅 ${day.label}</div>
+      ${(day.items||[]).length?(day.items||[]).map(item=>`
+        <div class="schedule-item"><span class="schedule-time">${item.time}</span><span class="schedule-text">${item.text}</span></div>`).join('')
+      :'<div style="color:#bbb;font-size:13px;">일정 없음</div>'}
+    </div>`).join('');
+}
+function renderRandomList(){
+  const el=document.getElementById('random-all-list');
+  setText('random-count', `총 ${(project.funList||[]).length}개 등록됨`);
+  if(!project.funList||!project.funList.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">플래닝 모드에서 놀거리를 추가해보세요!</div>'; return; }
+  el.innerHTML=project.funList.map(f=>`
+    <div class="acc-card" style="margin-bottom:10px;">
+      <div class="acc-card-title">🎡 ${f.name}</div>
+      ${f.link?`<a class="acc-card-link" href="${f.link}" target="_blank">🔗 링크</a>`:''}
+      ${f.memo?`<div style="font-size:12px;color:#888;margin-top:6px;">${f.memo}</div>`:''}
+    </div>`).join('');
+}
+window.spinRandom=function(){
+  if(!project.funList||!project.funList.length){ showToast('놀거리를 먼저 추가해주세요!'); return; }
+  const result=document.getElementById('random-result');
+  let count=0;
+  const interval=setInterval(()=>{
+    const r=project.funList[Math.floor(Math.random()*project.funList.length)];
+    result.innerHTML=`🎡 ${r.name}`;
+    if(++count>12){ clearInterval(interval); result.innerHTML+=`<small>✨ 오늘의 선택!</small>`; }
+  },120);
+}
+function renderTravelAcc(){
+  const el=document.getElementById('travel-acc-content');
+  const confirmed=(project.accommodations||[]).filter(a=>a.confirmed);
+  if(!confirmed.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">확정된 숙소가 없어요 🏨<br><small>플래닝 모드에서 확정해주세요!</small></div>'; return; }
+  el.innerHTML=confirmed.map(a=>`
+    <div class="acc-card travel-confirmed">
+      <div class="acc-card-header">
+        <div class="acc-card-title">✅ ${a.name}</div>
+        <div class="acc-card-price travel">${a.price||''}</div>
+      </div>
+      ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
+      ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
+      ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+    </div>`).join('');
+}
+
+// ══ SHARE ══
+window.openShareModal=function(){ if(project) setText('share-code-display',project.code); document.getElementById('modal-share').classList.remove('hidden'); }
+window.copyCode=function(){
+  if(!project) return;
+  navigator.clipboard.writeText(project.code).catch(()=>{});
+  showToast('📋 코드 복사!');
+}
+window.copyInviteMsg=function(){
+  const name=document.getElementById('invite-name').value||'친구';
+  const msg=`${name}야! 나랑 같이 여행 계획 짜자~! 🌏\n여행 플래너에서 코드 입력해줘: ${project.code}`;
+  navigator.clipboard.writeText(msg).catch(()=>{});
+  showToast('📤 초대 메시지 복사!');
+}
+window.changePw=async function(){
+  const pw=document.getElementById('new-pw').value;
+  project.password=pw; await saveProject();
+  showToast(pw?'🔒 비밀번호 설정!':'🔓 잠금 해제!');
+  closeModal('modal-share');
+}
+window.closeModal=closeModal;
+
+function updateStatusBadge(type){
+  if(type==='acc') setText('status-acc',(project.accommodations||[]).length+'개');
+  if(type==='fun') setText('status-fun',(project.funList||[]).length+'개');
+}
+</script>
+<style>
+  :root{--plan-primary:#FF8C42;--travel-primary:#4A90D9;--radius:20px;--radius-sm:12px;--shadow:0 4px 20px rgba(0,0,0,.08);--shadow-card:0 2px 12px rgba(0,0,0,.06);}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Segoe UI','Apple SD Gothic Neo',sans-serif;background:#FFF8F2;min-height:100vh;}
+  body.travel-mode{background:#F0F6FF;}
+  .screen{display:none;min-height:100vh;}
+  .screen.active{display:flex;flex-direction:column;}
+
+  /* HOME */
+  #screen-home{align-items:center;justify-content:center;background:linear-gradient(135deg,#FFF3E8,#FFE5CC);}
+  .home-logo{font-size:56px;margin-bottom:12px;}
+  .home-title{font-size:28px;font-weight:800;color:#FF8C42;margin-bottom:6px;}
+  .home-sub{color:#aaa;font-size:14px;margin-bottom:40px;}
+  .home-btns{display:flex;flex-direction:column;gap:14px;width:100%;max-width:300px;}
+  .btn-main{padding:16px;border-radius:50px;border:none;font-size:16px;font-weight:700;cursor:pointer;transition:all .2s;}
+  .btn-main:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(0,0,0,.15);}
+  .btn-orange{background:#FF8C42;color:#fff;}
+  .btn-outline{background:#fff;color:#FF8C42;border:2px solid #FF8C42;}
+
+  /* CREATE/JOIN */
+  #screen-create,#screen-join{background:linear-gradient(135deg,#FFF3E8,#FFE5CC);align-items:center;justify-content:center;}
+  .create-box,.join-box{background:#fff;border-radius:var(--radius);padding:32px;width:90%;max-width:420px;box-shadow:var(--shadow);}
+  .create-box h2,.join-box h2{font-size:20px;color:#FF8C42;margin-bottom:24px;text-align:center;}
+  .form-group{margin-bottom:16px;}
+  .form-group label{display:block;font-size:13px;font-weight:600;color:#888;margin-bottom:6px;}
+  .form-group input,.form-group select,.form-group textarea{width:100%;padding:12px 16px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:15px;outline:none;transition:border .2s;font-family:inherit;}
+  .form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:#FF8C42;}
+  .form-row{display:flex;gap:10px;}
+  .form-row .form-group{flex:1;}
+  .code-hint{text-align:center;font-size:12px;color:#bbb;margin-bottom:20px;}
+
+  /* HEADER */
+  .app-header{background:#fff;padding:0 16px;box-shadow:0 2px 12px rgba(255,140,66,.1);position:sticky;top:0;z-index:100;}
+  .app-header.travel{box-shadow:0 2px 12px rgba(74,144,217,.15);}
+  .header-top{display:flex;align-items:center;justify-content:space-between;padding:12px 0 8px;}
+  .header-project{font-size:16px;font-weight:800;color:#FF8C42;}
+  .header-project.travel{color:#4A90D9;}
+  .header-code{font-size:11px;background:#FFF3E8;color:#FF8C42;padding:4px 10px;border-radius:50px;font-weight:600;cursor:pointer;}
+  .header-code.travel{background:#E8F3FF;color:#4A90D9;}
+  .mode-toggle{display:flex;background:#F5F5F5;border-radius:50px;padding:3px;gap:3px;}
+  .mode-btn{padding:6px 14px;border-radius:50px;border:none;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;background:transparent;color:#bbb;}
+  .mode-btn.active-plan{background:#FF8C42;color:#fff;}
+  .mode-btn.active-travel{background:#4A90D9;color:#fff;}
+  .info-bar{padding:10px 0 12px;border-top:1px solid #FFF0E5;display:flex;gap:8px;flex-wrap:wrap;}
+  .info-bar.travel{border-top-color:#E0EDFF;}
+  .info-chip{display:flex;align-items:center;gap:5px;background:#FFF3E8;border-radius:50px;padding:5px 12px;font-size:12px;font-weight:600;color:#FF8C42;}
+  .info-chip.travel{background:#E8F3FF;color:#4A90D9;}
+  .info-bar-mini{padding:6px 0 8px;border-top:1px solid #FFF0E5;display:flex;gap:6px;align-items:center;flex-wrap:nowrap;overflow-x:auto;}
+  .info-bar-mini::-webkit-scrollbar{display:none;}
+  .info-chip-mini{white-space:nowrap;background:#FFF3E8;border-radius:50px;padding:3px 10px;font-size:11px;font-weight:600;color:#FF8C42;}
+  .mini-toggle-btn{margin-left:auto;font-size:11px;color:#ccc;background:none;border:none;cursor:pointer;flex-shrink:0;}
+
+  /* MAIN */
+  .main-content{flex:1;padding:16px;max-width:700px;width:100%;margin:0 auto;}
+  .section-title{font-size:18px;font-weight:800;color:#333;margin-bottom:14px;}
+  .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:20px;}
+  .menu-card{background:#fff;border-radius:var(--radius);padding:20px 16px;box-shadow:var(--shadow-card);cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:8px;border:2px solid transparent;}
+  .menu-card:hover{transform:translateY(-3px);box-shadow:0 6px 20px rgba(255,140,66,.15);border-color:#FFB380;}
+  .menu-card.travel-card:hover{box-shadow:0 6px 20px rgba(74,144,217,.15);border-color:#80B8F0;}
+  .menu-card .card-icon{font-size:32px;}
+  .menu-card .card-label{font-size:13px;font-weight:700;color:#555;text-align:center;}
+  .menu-card .card-status{font-size:10px;color:#bbb;}
+  .menu-card .card-status.done{color:#4CAF50;}
+
+  /* SUB PAGE */
+  .sub-header{display:flex;align-items:center;gap:10px;margin-bottom:20px;}
+  .back-btn{background:#FFF3E8;border:none;border-radius:50px;padding:8px 14px;font-size:13px;font-weight:700;color:#FF8C42;cursor:pointer;}
+  .back-btn.travel{background:#E8F3FF;color:#4A90D9;}
+  .sub-page-title{font-size:18px;font-weight:800;color:#333;}
+  .info-form{background:#fff;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow-card);}
+  .tag-input-wrap{display:flex;gap:8px;}
+  .tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+  .tag{background:#FFF3E8;color:#FF8C42;border-radius:50px;padding:4px 12px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:5px;}
+  .tag .rm{cursor:pointer;color:#FFB380;font-size:14px;line-height:1;}
+  .save-btn{width:100%;padding:14px;background:#FF8C42;color:#fff;border:none;border-radius:50px;font-size:15px;font-weight:700;cursor:pointer;margin-top:16px;transition:all .2s;}
+  .save-btn:hover{background:#e87830;}
+  .save-btn.travel{background:#4A90D9;}
+  .save-btn.travel:hover{background:#3a7fc8;}
+
+  /* ACC / FUN */
+  .acc-list{display:flex;flex-direction:column;gap:14px;margin-bottom:16px;}
+  .acc-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);border:2px solid transparent;transition:all .2s;}
+  .acc-card.confirmed{border-color:#FF8C42;}
+  .acc-card.travel-confirmed{border-color:#4A90D9;}
+  .acc-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;}
+  .acc-card-title{font-size:15px;font-weight:700;color:#333;}
+  .acc-card-price{font-size:13px;font-weight:700;color:#FF8C42;white-space:nowrap;}
+  .acc-card-price.travel{color:#4A90D9;}
+  .acc-card-link{font-size:11px;color:#4A90D9;text-decoration:none;display:inline-block;margin-top:4px;}
+  .acc-card-link:hover{text-decoration:underline;}
+  .acc-notes{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;}
+  .acc-note-tag{background:#FFF8F2;border:1px solid #FFE0C8;border-radius:50px;padding:3px 10px;font-size:11px;color:#888;}
+  .acc-photos{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
+  .acc-photo{width:70px;height:60px;border-radius:var(--radius-sm);overflow:hidden;background:#FFE8D0;}
+  .acc-photo img{width:100%;height:100%;object-fit:cover;}
+  .acc-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+  .acc-btn{padding:6px 14px;border-radius:50px;border:none;font-size:12px;font-weight:600;cursor:pointer;transition:all .2s;}
+  .acc-btn-confirm{background:#FF8C42;color:#fff;}
+  .acc-btn-confirm.confirmed{background:#4CAF50;}
+  .acc-btn-edit{background:#F5F5F5;color:#777;}
+  .acc-btn-del{background:#FFE8E8;color:#e74c3c;}
+  .drag-handle{cursor:grab;color:#ccc;font-size:18px;padding:0 4px;}
+  .add-card-btn{width:100%;padding:14px;background:#FFF3E8;color:#FF8C42;border:2px dashed #FFB380;border-radius:var(--radius);font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;}
+  .add-card-btn:hover{background:#FFE8D0;}
+
+  /* PHOTO URL input */
+  .photo-url-row{display:flex;gap:8px;margin-bottom:8px;}
+  .photo-url-row input{flex:1;padding:9px 12px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;}
+  .photo-url-row input:focus{border-color:#FF8C42;}
+  .photo-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;}
+  .photo-item{position:relative;}
+  .rm-photo{position:absolute;top:-5px;right:-5px;background:#e74c3c;color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;}
+
+  /* SCHEDULE */
+  .schedule-day{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:12px;}
+  .schedule-day-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+  .schedule-day-title{font-size:15px;font-weight:700;color:#FF8C42;}
+  .schedule-item{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed #FFE8D0;align-items:flex-start;}
+  .schedule-time{font-size:12px;color:#FF8C42;font-weight:600;min-width:45px;}
+  .schedule-text{font-size:13px;color:#555;flex:1;}
+  .add-item-row{display:flex;gap:8px;margin-top:10px;}
+  .add-item-row input{flex:1;padding:8px 12px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;}
+  .add-item-row input:focus{border-color:#FF8C42;}
+  .small-btn{padding:8px 14px;background:#FF8C42;color:#fff;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+
+  /* MEMO */
+  .memo-box{background:#fff;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow-card);}
+  .memo-textarea{width:100%;min-height:200px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);padding:14px;font-size:14px;font-family:inherit;resize:vertical;outline:none;line-height:1.6;}
+  .memo-textarea:focus{border-color:#FF8C42;}
+
+  /* CHECKLIST */
+  .checklist{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;}
+  .check-item{display:flex;align-items:center;gap:10px;background:#fff;border-radius:var(--radius-sm);padding:12px 14px;box-shadow:var(--shadow-card);}
+  .check-item input[type=checkbox]{width:18px;height:18px;accent-color:#FF8C42;cursor:pointer;flex-shrink:0;}
+  .check-item label{flex:1;font-size:14px;color:#444;cursor:pointer;}
+  .check-item label.done{text-decoration:line-through;color:#bbb;}
+  .del-check{background:none;border:none;color:#ddd;font-size:16px;cursor:pointer;}
+
+  /* COMPARE */
+  .compare-table{width:100%;border-collapse:collapse;background:#fff;border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow-card);}
+  .compare-table th{background:#FF8C42;color:#fff;padding:12px;font-size:13px;}
+  .compare-table td{padding:10px 12px;font-size:13px;color:#555;border-bottom:1px solid #FFE8D0;text-align:center;}
+  .compare-table tr:last-child td{border-bottom:none;}
+  .compare-table tr:hover td{background:#FFF8F2;}
+
+  /* OUTFIT */
+  .outfit-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+  .outfit-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);text-align:center;cursor:pointer;transition:all .2s;border:2px solid transparent;}
+  .outfit-card:hover,.outfit-card.selected{border-color:#FF8C42;}
+  .outfit-card .outfit-emoji{font-size:36px;margin-bottom:8px;}
+  .outfit-card .outfit-label{font-size:13px;font-weight:600;color:#555;}
+
+  /* TRAVEL */
+  .confirmed-display{background:#fff;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow-card);margin-bottom:12px;}
+  .confirmed-label{font-size:11px;color:#4A90D9;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}
+  .confirmed-value{font-size:15px;font-weight:700;color:#333;}
+  .confirmed-sub{font-size:12px;color:#888;margin-top:4px;}
+  .random-box{background:#fff;border-radius:var(--radius);padding:28px 20px;box-shadow:var(--shadow-card);text-align:center;}
+  .random-result{font-size:28px;font-weight:800;color:#4A90D9;margin:16px 0;min-height:48px;}
+  .random-result small{font-size:14px;color:#aaa;display:block;margin-top:4px;}
+  .spin-btn{padding:14px 32px;background:#4A90D9;color:#fff;border:none;border-radius:50px;font-size:16px;font-weight:700;cursor:pointer;transition:all .2s;}
+  .spin-btn:hover{background:#3a7fc8;transform:scale(1.04);}
+
+  /* MODAL */
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px;}
+  .modal-overlay.hidden{display:none;}
+  .modal{background:#fff;border-radius:var(--radius);padding:24px;width:100%;max-width:440px;max-height:90vh;overflow-y:auto;}
+  .modal h3{font-size:17px;font-weight:800;color:#FF8C42;margin-bottom:20px;}
+  .modal .close-btn{float:right;background:none;border:none;font-size:20px;cursor:pointer;color:#ccc;margin-top:-4px;}
+  .share-code-display{background:#FFF3E8;border-radius:var(--radius-sm);padding:16px;text-align:center;margin:12px 0;}
+  .share-code{font-size:28px;font-weight:800;color:#FF8C42;letter-spacing:4px;}
+  .invite-row{display:flex;gap:8px;}
+  .invite-row input{flex:1;padding:10px 14px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:14px;outline:none;}
+  .invite-row input:focus{border-color:#FF8C42;}
+
+  /* TOAST */
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:#333;color:#fff;padding:12px 24px;border-radius:50px;font-size:13px;font-weight:600;z-index:999;transition:transform .3s;pointer-events:none;}
+  .toast.show{transform:translateX(-50%) translateY(0);}
+
+  ::-webkit-scrollbar{width:6px;}
+  ::-webkit-scrollbar-thumb{background:#FFD0B0;border-radius:10px;}
+  @media(max-width:480px){.card-grid{grid-template-columns:1fr 1fr;}}
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<!-- HOME -->
+<div class="screen active" id="screen-home">
+  <div style="text-align:center;padding:20px;">
+    <div class="home-logo">🌏</div>
+    <div class="home-title">여행 플래너</div>
+    <div class="home-sub">함께 계획하고, 함께 떠나요!</div>
+    <div class="home-btns" style="margin:0 auto;">
+      <button class="btn-main btn-orange" onclick="playSound('travel');showScreen('screen-create')">✨ 새 프로젝트 만들기</button>
+      <button class="btn-main btn-outline" onclick="playSound('click');showScreen('screen-join')">🔑 코드로 참여하기</button>
+    </div>
+  </div>
+</div>
+
+<!-- CREATE -->
+<div class="screen" id="screen-create">
+  <div style="padding:16px;max-width:420px;width:100%;margin:0 auto;">
+    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="showScreen('screen-home')">← 뒤로</button>
+    <div class="create-box">
+      <h2>✨ 새 프로젝트 만들기</h2>
+      <div class="form-group"><label>여행 이름</label><input type="text" id="c-name" placeholder="예: 오사카 여행 2025 🍣"></div>
+      <div class="form-row">
+        <div class="form-group"><label>시작일</label><input type="date" id="c-start"></div>
+        <div class="form-group"><label>종료일</label><input type="date" id="c-end"></div>
+      </div>
+      <div class="form-group"><label>비밀번호 (선택, 잠금용)</label><input type="password" id="c-pw" placeholder="입력 시 비밀번호로 잠금"></div>
+      <div class="code-hint">프로젝트 생성 시 고유 코드가 자동 발급됩니다 🎲</div>
+      <button class="btn-main btn-orange" onclick="playSound('travel');createProject()" style="width:100%;">🚀 프로젝트 생성하기</button>
+    </div>
+  </div>
+</div>
+
+<!-- JOIN -->
+<div class="screen" id="screen-join">
+  <div style="padding:16px;max-width:380px;width:100%;margin:0 auto;">
+    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="showScreen('screen-home')">← 뒤로</button>
+    <div class="join-box">
+      <h2>🔑 코드로 참여하기</h2>
+      <div class="form-group"><label>프로젝트 코드</label><input type="text" id="j-code" placeholder="예: TRIP-A1B2" style="text-transform:uppercase;letter-spacing:2px;font-size:18px;font-weight:700;"></div>
+      <div class="form-group"><label>비밀번호 (잠금 설정된 경우)</label><input type="password" id="j-pw" placeholder="비밀번호 입력"></div>
+      <button class="btn-main btn-orange" onclick="playSound('coin');joinProject()" style="width:100%;">참여하기 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- PLANNING MAIN -->
+<div class="screen" id="screen-plan-main">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project" id="plan-header-title">✈️ 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code" id="plan-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
+        <div class="mode-toggle">
+          <button class="mode-btn active-plan">🗓 플래닝</button>
+          <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar">
+      <div class="info-chip"><span>📅</span><span id="ib-dates">날짜 미정</span></div>
+      <div class="info-chip"><span>📍</span><span id="ib-place">장소 미정</span></div>
+      <div class="info-chip"><span>👥</span><span id="ib-members">구성원 미정</span></div>
+      <div class="info-chip"><span>🚗</span><span id="ib-transport">이동수단 미정</span></div>
+      <div class="info-chip"><span>🎨</span><span id="ib-theme">테마 미정</span></div>
+      <div class="info-chip"><span>💰</span><span id="ib-budget">예산 미정</span></div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="section-title">🌟 플래닝 메뉴</div>
+    <div class="card-grid">
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-info')"><div class="card-icon">📋</div><div class="card-label">기본 정보</div><div class="card-status" id="status-info">미입력</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-acc')"><div class="card-icon">🏨</div><div class="card-label">숙소 리스트</div><div class="card-status" id="status-acc">0개</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-schedule')"><div class="card-icon">📅</div><div class="card-label">일정 입력</div><div class="card-status" id="status-schedule">선택사항</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div><div class="card-status" id="status-fun">0개</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-compare')"><div class="card-icon">🆚</div><div class="card-label">숙소 비교</div><div class="card-status">비교하기</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div><div class="card-status" id="status-memo">비어있음</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물</div><div class="card-status" id="status-pack">0개</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-outfit')"><div class="card-icon">👗</div><div class="card-label">옷차림·컨셉</div><div class="card-status" id="status-outfit">미정</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- SUB: BASIC INFO -->
+<div class="screen" id="sub-info">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project" id="sub-info-proj-title">✈️ 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn active-plan" style="font-size:10px;padding:4px 8px;">🗓 플래닝</button>
+          <button class="mode-btn" style="font-size:10px;padding:4px 8px;" onclick="switchMode('travel')">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="mini-dates">📅 날짜</span>
+      <span class="info-chip-mini" id="mini-place">📍 장소</span>
+      <span class="info-chip-mini" id="mini-members">👥 구성원</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-info')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📋 기본 정보 입력</div></div>
+    <div class="info-form">
+      <div class="form-group"><label>여행 장소</label><input type="text" id="f-place" placeholder="예: 오사카, 도쿄"></div>
+      <div class="form-row">
+        <div class="form-group"><label>시작일</label><input type="date" id="f-start"></div>
+        <div class="form-group"><label>종료일</label><input type="date" id="f-end"></div>
+      </div>
+      <div class="form-group">
+        <label>구성원</label>
+        <div class="tag-input-wrap"><input type="text" id="f-member-input" placeholder="이름 입력 후 엔터" onkeydown="addTag(event,'members','f-member-input')"><button class="acc-btn acc-btn-confirm" onclick="addTagBtn('members','f-member-input');playSound('pop')">추가</button></div>
+        <div class="tag-list" id="tag-members"></div>
+      </div>
+      <div class="form-group"><label>이동 수단</label><select id="f-transport"><option value="">선택</option><option>✈️ 비행기</option><option>🚂 기차</option><option>🚌 버스</option><option>🚗 자동차</option><option>🚢 배</option></select></div>
+      <div class="form-group">
+        <label>여행 추구미 / 테마</label>
+        <div class="tag-input-wrap"><input type="text" id="f-theme-input" placeholder="예: 힐링, 맛집 탐방" onkeydown="addTag(event,'themes','f-theme-input')"><button class="acc-btn acc-btn-confirm" onclick="addTagBtn('themes','f-theme-input');playSound('pop')">추가</button></div>
+        <div class="tag-list" id="tag-themes"></div>
+      </div>
+      <div class="form-group">
+        <label>💰 예산 (총 예산)</label>
+        <div style="position:relative;">
+          <input type="text" id="f-budget" placeholder="예: 50만원, 1인 30만원 등">
+        </div>
+      </div>
+      <button class="save-btn" onclick="saveBasicInfo()">💾 저장 &amp; 공유하기</button>
+    </div>
+  </div>
+</div>
+
+<!-- SUB: ACCOMMODATION -->
+<div class="screen" id="sub-acc">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project" id="sub-acc-proj-title">✈️ 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn active-plan" style="font-size:10px;padding:4px 8px;">🗓 플래닝</button>
+          <button class="mode-btn" style="font-size:10px;padding:4px 8px;" onclick="switchMode('travel')">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="acc-mini-dates">📅</span>
+      <span class="info-chip-mini" id="acc-mini-place">📍</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-acc')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🏨 숙소 리스트</div></div>
+    <div class="acc-list" id="acc-list"></div>
+    <button class="add-card-btn" onclick="playSound('pop');openAccModal()">+ 숙소 추가하기</button>
+  </div>
+</div>
+
+<!-- SUB: SCHEDULE -->
+<div class="screen" id="sub-schedule">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn active-plan" style="font-size:10px;padding:4px 8px;">🗓 플래닝</button>
+          <button class="mode-btn" style="font-size:10px;padding:4px 8px;" onclick="switchMode('travel')">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="sched-mini-dates">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-schedule')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📅 일정 입력 (선택)</div></div>
+    <div id="schedule-list"></div>
+    <button class="add-card-btn" onclick="addScheduleDay()">+ 날짜 추가</button>
+  </div>
+</div>
+
+<!-- SUB: FUN -->
+<div class="screen" id="sub-fun">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project" id="sub-fun-proj-title">✈️ 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn active-plan" style="font-size:10px;padding:4px 8px;">🗓 플래닝</button>
+          <button class="mode-btn" style="font-size:10px;padding:4px 8px;" onclick="switchMode('travel')">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="fun-mini-dates">📅</span>
+      <span class="info-chip-mini" id="fun-mini-place">📍</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-fun')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎡 놀거리 리스트</div></div>
+    <div class="acc-list" id="fun-list"></div>
+    <button class="add-card-btn" onclick="playSound('pop');openFunModal()">+ 놀거리 추가하기</button>
+  </div>
+</div>
+
+<!-- SUB: COMPARE -->
+<div class="screen" id="sub-compare">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active-plan">🗓 플래닝</button>
+        <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="cmp-mini-dates">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-compare')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🆚 숙소 비교</div></div>
+    <div id="compare-content"></div>
+  </div>
+</div>
+
+<!-- SUB: MEMO -->
+<div class="screen" id="sub-memo">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active-plan">🗓 플래닝</button>
+        <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📝 메모</div></div>
+    <div class="memo-box"><textarea class="memo-textarea" id="memo-text" placeholder="자유롭게 메모하세요 ✍️" oninput="saveMemo()"></textarea></div>
+  </div>
+</div>
+
+<!-- SUB: PACK -->
+<div class="screen" id="sub-pack">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active-plan">🗓 플래닝</button>
+        <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎒 준비물</div></div>
+    <div class="checklist" id="pack-list"></div>
+    <div class="add-item-row">
+      <input type="text" id="pack-input" placeholder="준비물 입력 후 엔터" onkeydown="addPackItem(event)">
+      <button class="small-btn" onclick="addPackItemBtn()">추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- SUB: OUTFIT -->
+<div class="screen" id="sub-outfit">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active-plan">🗓 플래닝</button>
+        <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">👗 옷차림 · 컨셉</div></div>
+    <div class="outfit-grid">
+      <div class="outfit-card" onclick="selectOutfit(this,'casual')"><div class="outfit-emoji">👕</div><div class="outfit-label">캐주얼</div></div>
+      <div class="outfit-card" onclick="selectOutfit(this,'chic')"><div class="outfit-emoji">🥻</div><div class="outfit-label">시크&세련</div></div>
+      <div class="outfit-card" onclick="selectOutfit(this,'sporty')"><div class="outfit-emoji">🏃</div><div class="outfit-label">스포티</div></div>
+      <div class="outfit-card" onclick="selectOutfit(this,'cute')"><div class="outfit-emoji">🎀</div><div class="outfit-label">큐트&러블리</div></div>
+      <div class="outfit-card" onclick="selectOutfit(this,'outdoor')"><div class="outfit-emoji">🏕️</div><div class="outfit-label">아웃도어</div></div>
+      <div class="outfit-card" onclick="selectOutfit(this,'vintage')"><div class="outfit-emoji">🎩</div><div class="outfit-label">빈티지</div></div>
+    </div>
+    <div class="form-group" style="margin-top:16px;">
+      <label style="font-size:13px;font-weight:600;color:#888;">추가 메모</label>
+      <textarea id="outfit-memo" placeholder="예: 편한 신발 필수, 레이어드룩" style="width:100%;min-height:80px;border:2px solid #FFE0C8;border-radius:12px;padding:12px;font-size:14px;font-family:inherit;resize:vertical;outline:none;margin-top:6px;"></textarea>
+    </div>
+    <button class="save-btn" onclick="saveOutfit()">💾 저장</button>
+  </div>
+</div>
+
+<!-- TRAVEL MAIN -->
+<div class="screen" id="screen-travel-main">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel" id="travel-header-title">🧳 여행</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code travel" id="travel-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
+        <div class="mode-toggle">
+          <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+          <button class="mode-btn active-travel">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar travel">
+      <div class="info-chip travel"><span>📅</span><span id="tib-dates">날짜 미정</span></div>
+      <div class="info-chip travel"><span>📍</span><span id="tib-place">장소 미정</span></div>
+      <div class="info-chip travel"><span>👥</span><span id="tib-members">구성원 미정</span></div>
+      <div class="info-chip travel"><span>🚗</span><span id="tib-transport">이동수단 미정</span></div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="section-title">🧳 트레블 메뉴</div>
+    <div class="card-grid">
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-summary')"><div class="card-icon">📋</div><div class="card-label">플랜 요약</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-schedule')"><div class="card-icon">📅</div><div class="card-label">오늘 일정</div></div>
+      <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물 체크</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- SUB: TRAVEL SUMMARY -->
+<div class="screen" id="sub-travel-summary">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">📋 요약</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code travel" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+          <button class="mode-btn active-travel" style="font-size:10px;padding:4px 8px;">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="tsumm-mini">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-travel-summary')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📋 플랜 요약</div></div>
+    <div id="travel-summary-content"></div>
+  </div>
+</div>
+
+<!-- SUB: TRAVEL SCHEDULE -->
+<div class="screen" id="sub-travel-schedule">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">📅 일정</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span class="header-code travel" onclick="openShareModal()">📋 코드</span>
+        <div class="mode-toggle">
+          <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+          <button class="mode-btn active-travel" style="font-size:10px;padding:4px 8px;">🧳 트레블</button>
+        </div>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="tsched-mini">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-travel-schedule')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📅 일정 상세 확인</div></div>
+    <div id="travel-schedule-content"></div>
+  </div>
+</div>
+
+<!-- SUB: TRAVEL RANDOM -->
+<div class="screen" id="sub-travel-random">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">🎲 랜덤</div>
+      <div class="mode-toggle">
+        <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+        <button class="mode-btn active-travel">🧳 트레블</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎲 놀거리 랜덤 뽑기</div></div>
+    <div class="random-box">
+      <div style="font-size:14px;color:#888;margin-bottom:4px;">오늘 뭐하지? 🤔</div>
+      <div class="random-result" id="random-result"><small>버튼을 눌러 뽑아보세요!</small></div>
+      <button class="spin-btn" onclick="playSound('coin');spinRandom()">🎰 랜덤 뽑기!</button>
+      <div style="font-size:12px;color:#ccc;margin-top:16px;" id="random-count"></div>
+    </div>
+    <div style="margin-top:20px;">
+      <div class="section-title" style="font-size:14px;color:#888;margin-bottom:10px;">등록된 놀거리 목록</div>
+      <div id="random-all-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- SUB: TRAVEL ACC -->
+<div class="screen" id="sub-travel-acc">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">🏨 숙소</div>
+      <div class="mode-toggle">
+        <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+        <button class="mode-btn active-travel">🧳 트레블</button>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="tacc-mini">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-travel-acc')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🏨 확정 숙소</div></div>
+    <div id="travel-acc-content"></div>
+  </div>
+</div>
+
+<!-- MODAL: ACCOMMODATION -->
+<div class="modal-overlay hidden" id="modal-acc">
+  <div class="modal">
+    <h3>🏨 숙소 추가/수정 <button class="close-btn" onclick="closeModal('modal-acc')">✕</button></h3>
+    <div class="form-group"><label>숙소 이름</label><input type="text" id="acc-name" placeholder="예: 도톤보리 리버사이드 호텔"></div>
+    <div class="form-group"><label>가격 (1박 기준)</label><input type="text" id="acc-price" placeholder="예: 120,000원"></div>
+    <div class="form-group"><label>예약 사이트 링크</label><input type="url" id="acc-link" placeholder="https://..."></div>
+    <div class="form-group">
+      <label>특이사항 (최대 5개)</label>
+      <div class="tag-input-wrap"><input type="text" id="acc-note-input" placeholder="특이사항 입력" onkeydown="addAccNote(event)"><button class="acc-btn acc-btn-confirm" onclick="addAccNoteBtn()">추가</button></div>
+      <div class="tag-list" id="acc-note-tags"></div>
+    </div>
+    <div class="form-group">
+      <label>사진 URL 추가</label>
+      <div class="photo-url-row">
+        <input type="url" id="acc-photo-url" placeholder="https://이미지URL.jpg">
+        <button class="acc-btn acc-btn-confirm" onclick="addAccPhotoUrl()">추가</button>
+      </div>
+      <div class="photo-list" id="acc-photo-list"></div>
+    </div>
+    <button class="save-btn" onclick="playSound('save');saveAccommodation()">저장하기</button>
+  </div>
+</div>
+
+<!-- MODAL: FUN -->
+<div class="modal-overlay hidden" id="modal-fun">
+  <div class="modal">
+    <h3>🎡 놀거리 추가/수정 <button class="close-btn" onclick="closeModal('modal-fun')">✕</button></h3>
+    <div class="form-group"><label>놀거리 이름</label><input type="text" id="fun-name" placeholder="예: 도톤보리 런치 크루즈"></div>
+    <div class="form-group"><label>링크 (참고 사이트)</label><input type="url" id="fun-link" placeholder="https://..."></div>
+    <div class="form-group"><label>메모 / 자료</label><textarea id="fun-memo" placeholder="가격, 운영시간, 특이사항 등" style="width:100%;min-height:80px;border:2px solid #FFE0C8;border-radius:12px;padding:12px;font-size:14px;font-family:inherit;resize:vertical;outline:none;"></textarea></div>
+    <div class="form-group">
+      <label>사진 URL 추가</label>
+      <div class="photo-url-row">
+        <input type="url" id="fun-photo-url" placeholder="https://이미지URL.jpg">
+        <button class="acc-btn acc-btn-confirm" onclick="addFunPhotoUrl()">추가</button>
+      </div>
+      <div class="photo-list" id="fun-photo-list"></div>
+    </div>
+    <button class="save-btn" onclick="playSound('save');saveFun()">저장하기</button>
+  </div>
+</div>
+
+<!-- MODAL: SHARE -->
+<div class="modal-overlay hidden" id="modal-share">
+  <div class="modal">
+    <h3>📤 공유 & 초대 <button class="close-btn" onclick="closeModal('modal-share')">✕</button></h3>
+    <div style="background:#E8F8EF;border-radius:12px;padding:10px 14px;font-size:12px;color:#2e7d52;margin-bottom:12px;">🟢 Firebase 실시간 연동 중 — 같은 코드를 입력한 모든 기기에서 즉시 동기화됩니다!</div>
+    <div class="share-code-display">
+      <div style="font-size:12px;color:#aaa;margin-bottom:6px;">프로젝트 코드</div>
+      <div class="share-code" id="share-code-display">TRIP-XXXX</div>
+      <div style="font-size:12px;color:#aaa;margin-top:4px;">이 코드를 친구에게 알려주세요!</div>
+    </div>
+    <button class="save-btn" onclick="copyCode()" style="margin-bottom:12px;">📋 코드 복사하기</button>
+    <div style="font-size:13px;font-weight:700;color:#888;margin-bottom:8px;">초대 메시지 보내기</div>
+    <div class="invite-row">
+      <input type="text" id="invite-name" placeholder="친구 이름">
+      <button class="acc-btn acc-btn-confirm" onclick="copyInviteMsg()">메시지 복사</button>
+    </div>
+    <div style="margin-top:16px;">
+      <div style="font-size:13px;font-weight:700;color:#888;margin-bottom:8px;">🔒 비밀번호 변경</div>
+      <div class="invite-row">
+        <input type="password" id="new-pw" placeholder="새 비밀번호 (비우면 잠금 해제)">
+        <button class="acc-btn acc-btn-confirm" onclick="changePw()">변경</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
