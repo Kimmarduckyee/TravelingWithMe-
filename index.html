@@ -6,7 +6,7 @@
 <title>🌏 TravelingWithMe!</title>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, set, get, update, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getDatabase, ref, set, get, update, remove, onValue, off, onDisconnect, push, query, limitToLast } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const firebaseConfig = {
@@ -39,6 +39,16 @@ let dragAccIdx = null;
 let currentUser = null;
 let userProfile = null;
 let selectedAvatar = null;
+let connectedListenerRef = null;
+let presenceRef = null;
+let membersDataListener = null;
+let presenceDataListener = null;
+let membersCache = {};
+let presenceCache = {};
+let starsGenerated = false;
+let typingTimeout = null;
+let typingDataListener = null;
+let chatDataListener = null;
 const AVATAR_LIST = ['Profile_1_hearts.png','profile_2_dumb.png','profile_3_tease.png','profile_4_smirk.png','profile_5_Cat.png','profile_6_Dev.png'];
 const AVATAR_PATH = './Profile/';
 
@@ -63,6 +73,7 @@ function getAudioCtx() {
   return soundCtx.ctx;
 }
 window.playSound = function playSound(type) {
+  if(userProfile && userProfile.soundEnabled === false) return;
   try {
     const ctx = getAudioCtx();
     const now = ctx.currentTime;
@@ -149,6 +160,11 @@ window.signInWithGoogle = async function() {
 }
 window.logout = async function() {
   if(dbListener) { off(dbListener); dbListener = null; }
+  detachPresence();
+  detachMembersDataListeners();
+  detachTypingListener();
+  detachChatListener();
+  setChatVisible(false);
   project = null; projectCode = null;
   try { await signOut(auth); } catch(e) {}
   showToast('👋 로그아웃 되었습니다');
@@ -161,6 +177,7 @@ onAuthStateChanged(auth, async (user) => {
   } else {
     currentUser = null;
     userProfile = null;
+    applyTheme('default');
     showScreen('screen-login');
   }
 });
@@ -171,10 +188,12 @@ async function loadUserProfile() {
     if(snap.exists() && snap.val().nickname) {
       userProfile = snap.val();
       if(!userProfile.projects) userProfile.projects = {};
+      applyTheme(userProfile.theme || 'default');
       showDashboard();
     } else {
       userProfile = (snap.exists() ? snap.val() : {}) || {};
       if(!userProfile.projects) userProfile.projects = {};
+      applyTheme(userProfile.theme || 'default');
       showProfileSetup();
     }
   } catch(e) {
@@ -215,7 +234,7 @@ window.saveProfile = async function() {
   if(!nickname) { showToast('닉네임을 입력해주세요!'); return; }
   if(!selectedAvatar) { showToast('프로필 아바타를 선택해주세요!'); return; }
   try {
-    userProfile = { nickname, photo: selectedAvatar, projects: (userProfile && userProfile.projects) || {} };
+    userProfile = { nickname, photo: selectedAvatar, projects: (userProfile && userProfile.projects) || {}, soundEnabled: true, theme: 'default' };
     await set(ref(db, 'users/' + currentUser.uid), userProfile);
     playSound('save');
     showToast('✅ 프로필 설정 완료!');
@@ -247,16 +266,23 @@ async function renderProjectList() {
   }
   list.innerHTML = '<div class="empty-hint">불러오는 중... 🔄</div>';
   const cards = [];
+  let removedAny = false;
   for(const code of codes) {
     try {
       const snap = await get(ref(db, 'projects/' + code));
       if(snap.exists()) cards.push({ code, p: snap.val() });
+      else {
+        delete userProfile.projects[code];
+        removedAny = true;
+        remove(ref(db, `users/${currentUser.uid}/projects/${code}`)).catch(()=>{});
+      }
     } catch(e) {}
   }
   if(!cards.length) {
     list.innerHTML = '<div class="empty-hint">아직 참여한 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
     return;
   }
+  if(removedAny) showToast('🗑️ 삭제된 프로젝트를 목록에서 정리했어요');
   list.innerHTML = cards.map(({code,p}) => `
     <div class="project-card" onclick="playSound('pop');openProjectFromDashboard('${code}')">
       <div class="project-card-thumb">✈️</div>
@@ -281,6 +307,11 @@ window.openProjectFromDashboard = async function(code) {
 }
 window.goToDashboard = function() {
   if(dbListener) { off(dbListener); dbListener = null; }
+  detachPresence();
+  detachMembersDataListeners();
+  detachTypingListener();
+  detachChatListener();
+  setChatVisible(false);
   project = null; projectCode = null;
   playSound('click');
   showDashboard();
@@ -312,6 +343,226 @@ async function registerProjectToUser(code) {
   } catch(e) {}
 }
 
+// ══ PROJECT ROOM: MEMBERS / PRESENCE / HOST ══
+async function registerMember(code) {
+  if(!currentUser || !userProfile || !code) return;
+  try {
+    await update(ref(db, `projects/${code}/members/${currentUser.uid}`), {
+      nickname: userProfile.nickname || '여행자',
+      photo: userProfile.photo || AVATAR_LIST[0]
+    });
+  } catch(e) {}
+}
+function attachPresence(code) {
+  if(!currentUser || !code) return;
+  detachPresence();
+  const connRef = ref(db, '.info/connected');
+  connectedListenerRef = connRef;
+  onValue(connRef, (snap) => {
+    if(snap.val() === true && currentUser && projectCode === code) {
+      const pRef = ref(db, `projects/${code}/presence/${currentUser.uid}`);
+      presenceRef = pRef;
+      onDisconnect(pRef).remove();
+      set(pRef, true);
+      onDisconnect(ref(db, `projects/${code}/typing/${currentUser.uid}`)).remove();
+    }
+  });
+}
+function detachPresence() {
+  if(presenceRef) { remove(presenceRef).catch(()=>{}); presenceRef = null; }
+  if(connectedListenerRef) { off(connectedListenerRef); connectedListenerRef = null; }
+  if(currentUser && projectCode) {
+    remove(ref(db, `projects/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
+  }
+}
+function attachMembersListener(code) {
+  detachMembersDataListeners();
+  if(!code) return;
+  const mRef = ref(db, `projects/${code}/members`);
+  const pRef = ref(db, `projects/${code}/presence`);
+  membersDataListener = mRef;
+  presenceDataListener = pRef;
+  onValue(mRef, snap => { membersCache = snap.val() || {}; renderMembersList(); });
+  onValue(pRef, snap => { presenceCache = snap.val() || {}; renderMembersList(); });
+}
+function detachMembersDataListeners() {
+  if(membersDataListener) { off(membersDataListener); membersDataListener = null; }
+  if(presenceDataListener) { off(presenceDataListener); presenceDataListener = null; }
+  membersCache = {}; presenceCache = {};
+}
+function renderMembersList() {
+  const entries = Object.entries(membersCache);
+  let html;
+  if(!entries.length) {
+    html = '<div style="font-size:12px;color:#bbb;">참여자 정보를 불러오는 중...</div>';
+  } else {
+    html = entries.map(([uid,m]) => {
+      const online = !!presenceCache[uid];
+      const isHost = !!(project && project.hostUid === uid);
+      return `<div class="member-chip">
+        <img class="member-avatar" src="${getPhotoUrl(m.photo)}" onerror="this.style.display='none'">
+        <span class="member-name">${m.nickname || '여행자'}${isHost?' 👑':''}</span>
+        <span class="member-dot ${online?'online':'offline'}" title="${online?'온라인':'오프라인'}"></span>
+      </div>`;
+    }).join('');
+  }
+  ['members-list-plan','members-list-travel'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = html;
+  });
+}
+function updateHostUI() {
+  const isHost = !!(project && currentUser && project.hostUid === currentUser.uid);
+  document.querySelectorAll('.host-only-delete').forEach(el => el.style.display = isHost ? '' : 'none');
+}
+
+// ══ TYPING INDICATOR ══
+window.notifyTyping = function() {
+  if(!currentUser || !projectCode || !userProfile) return;
+  const tRef = ref(db, `projects/${projectCode}/typing/${currentUser.uid}`);
+  set(tRef, userProfile.nickname || '누군가').catch(()=>{});
+  if(typingTimeout) clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(() => {
+    remove(tRef).catch(()=>{});
+  }, 1000);
+}
+function attachTypingListener(code) {
+  detachTypingListener();
+  if(!code) return;
+  const tRef = ref(db, `projects/${code}/typing`);
+  typingDataListener = tRef;
+  onValue(tRef, snap => {
+    const data = snap.val() || {};
+    const others = Object.entries(data).filter(([uid]) => !currentUser || uid !== currentUser.uid);
+    const el = document.getElementById('typing-indicator');
+    if(!el) return;
+    if(!others.length) { el.classList.remove('show'); el.textContent = ''; return; }
+    const names = others.map(([,n]) => n);
+    let text;
+    if(names.length === 1) text = `${names[0]}님이 입력 중입니다...`;
+    else text = `${names.slice(0,-1).join(', ')}님과 ${names[names.length-1]}님이 입력 중입니다...`;
+    el.textContent = text;
+    el.classList.add('show');
+  });
+}
+function detachTypingListener() {
+  if(typingDataListener) { off(typingDataListener); typingDataListener = null; }
+  const el = document.getElementById('typing-indicator');
+  if(el) { el.classList.remove('show'); el.textContent = ''; }
+}
+
+// ══ REALTIME CHAT ══
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function attachChatListener(code) {
+  detachChatListener();
+  if(!code) return;
+  const cRef = query(ref(db, `projects/${code}/chat`), limitToLast(100));
+  chatDataListener = cRef;
+  onValue(cRef, snap => {
+    renderChatMessages(snap.val() || {});
+  });
+}
+function detachChatListener() {
+  if(chatDataListener) { off(chatDataListener); chatDataListener = null; }
+  const list = document.getElementById('chat-messages');
+  if(list) list.innerHTML = '';
+}
+function renderChatMessages(data) {
+  const list = document.getElementById('chat-messages');
+  if(!list) return;
+  const msgs = Object.values(data).sort((a,b) => (a.ts||0) - (b.ts||0));
+  if(!msgs.length) {
+    list.innerHTML = '<div class="chat-empty">아직 메시지가 없어요. 첫 메시지를 보내보세요! 💬</div>';
+    return;
+  }
+  list.innerHTML = msgs.map(m => {
+    const mine = !!(currentUser && m.uid === currentUser.uid);
+    return `<div class="chat-msg ${mine?'mine':''}">
+      <img class="chat-avatar" src="${getPhotoUrl(m.photo)}" onerror="this.style.display='none'">
+      <div class="chat-bubble-wrap">
+        <div class="chat-name">${escapeHtml(m.nickname||'여행자')}</div>
+        <div class="chat-bubble">${escapeHtml(m.text)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  list.scrollTop = list.scrollHeight;
+}
+window.sendChatMessage = async function() {
+  const input = document.getElementById('chat-input');
+  if(!input) return;
+  const text = input.value.trim();
+  if(!text) return;
+  if(!projectCode || !currentUser || !userProfile) return;
+  try {
+    const msgRef = push(ref(db, `projects/${projectCode}/chat`));
+    await set(msgRef, {
+      uid: currentUser.uid,
+      nickname: userProfile.nickname || '여행자',
+      photo: userProfile.photo || AVATAR_LIST[0],
+      text,
+      ts: Date.now()
+    });
+    input.value = '';
+    playSound('pop');
+    if(typingTimeout) clearTimeout(typingTimeout);
+    remove(ref(db, `projects/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
+  } catch(e) { showToast('⚠️ 전송 실패: ' + e.message); }
+}
+window.toggleChatPanel = function() {
+  const panel = document.getElementById('chat-panel');
+  if(!panel) return;
+  panel.classList.toggle('open');
+  if(panel.classList.contains('open')) {
+    playSound('click');
+    const list = document.getElementById('chat-messages');
+    if(list) setTimeout(() => { list.scrollTop = list.scrollHeight; }, 50);
+  }
+}
+function setChatVisible(visible) {
+  const fab = document.getElementById('chat-fab');
+  const panel = document.getElementById('chat-panel');
+  if(fab) fab.style.display = visible ? 'flex' : 'none';
+  if(!visible && panel) panel.classList.remove('open');
+}
+
+// ══ GLOBAL TYPING DETECTION ══
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if(!projectCode || !currentUser) return;
+  if(t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA') return;
+  if(t.id === 'chat-input') return;
+  window.notifyTyping();
+});
+
+window.openDeleteConfirm = function() {
+  if(!project || !currentUser || project.hostUid !== currentUser.uid) return;
+  playSound('click');
+  document.getElementById('modal-delete').classList.remove('hidden');
+}
+window.confirmDeleteProject = async function() {
+  if(!project || !projectCode || !currentUser || project.hostUid !== currentUser.uid) {
+    showToast('⚠️ 방장만 삭제할 수 있어요'); return;
+  }
+  try {
+    const code = projectCode;
+    detachPresence();
+    detachMembersDataListeners();
+    detachTypingListener();
+    detachChatListener();
+    setChatVisible(false);
+    if(dbListener) { off(dbListener); dbListener = null; }
+    await remove(ref(db, 'projects/' + code));
+    await remove(ref(db, `users/${currentUser.uid}/projects/${code}`));
+    if(userProfile.projects) delete userProfile.projects[code];
+    closeModal('modal-delete');
+    project = null; projectCode = null;
+    showToast('🗑️ 프로젝트가 삭제되었습니다');
+    showDashboard();
+  } catch(e) { showToast('⚠️ 삭제 실패: ' + e.message); }
+}
+
 // ══ GUIDE MODAL ══
 window.openGuideModal = function() {
   playSound('pop');
@@ -333,6 +584,10 @@ window.openSettings = function() {
   settingsSelectedAvatar = (userProfile && userProfile.photo) || AVATAR_LIST[0];
   setValue('settings-nickname', (userProfile && userProfile.nickname) || '');
   renderAvatarGridInto('settings-avatar-grid', settingsSelectedAvatar, 'selectSettingsAvatar');
+  const soundCb = document.getElementById('settings-sound');
+  if(soundCb) soundCb.checked = !(userProfile && userProfile.soundEnabled === false);
+  const curTheme = (userProfile && userProfile.theme) || 'default';
+  document.querySelectorAll('.theme-option').forEach(o => o.classList.toggle('selected', o.dataset.themeId === curTheme));
 }
 window.selectSettingsAvatar = function(el, filename) {
   document.querySelectorAll('#settings-avatar-grid .avatar-option').forEach(a=>a.classList.remove('selected'));
@@ -348,12 +603,57 @@ window.saveSettings = async function() {
     userProfile.nickname = nickname;
     userProfile.photo = settingsSelectedAvatar;
     await update(ref(db, 'users/' + currentUser.uid), { nickname, photo: settingsSelectedAvatar });
+    if(projectCode) await registerMember(projectCode);
     playSound('save');
     showToast('✅ 프로필이 수정되었습니다!');
     showDashboard();
   } catch(e) {
     showToast('⚠️ 저장 실패: ' + e.message);
   }
+}
+
+// ══ SOUND TOGGLE ══
+window.toggleSoundSetting = async function() {
+  const checked = document.getElementById('settings-sound').checked;
+  if(!userProfile) return;
+  userProfile.soundEnabled = checked;
+  if(checked) playSound('pop');
+  try { await update(ref(db, 'users/' + currentUser.uid), { soundEnabled: checked }); } catch(e) {}
+}
+
+// ══ THEME ══
+window.selectThemeOption = async function(theme) {
+  if(!userProfile) return;
+  userProfile.theme = theme;
+  applyTheme(theme);
+  playSound('click');
+  document.querySelectorAll('.theme-option').forEach(o => o.classList.toggle('selected', o.dataset.themeId === theme));
+  try { await update(ref(db, 'users/' + currentUser.uid), { theme }); } catch(e) {}
+}
+function applyTheme(theme) {
+  const t = theme || 'default';
+  document.documentElement.setAttribute('data-theme', t);
+  const starsEl = document.getElementById('theme-bg-stars');
+  const summerEl = document.getElementById('theme-bg-summer');
+  if(starsEl) starsEl.classList.toggle('active', t === 'dark');
+  if(summerEl) summerEl.classList.toggle('active', t === 'summer');
+  if(t === 'dark') ensureStars();
+}
+function ensureStars() {
+  if(starsGenerated) return;
+  const container = document.getElementById('theme-bg-stars');
+  if(!container) return;
+  let html = '';
+  for(let i=0;i<90;i++) {
+    const x = (Math.random()*100).toFixed(2);
+    const y = (Math.random()*100).toFixed(2);
+    const size = (Math.random()*2.2+0.8).toFixed(1);
+    const delay = (Math.random()*5).toFixed(2);
+    const dur = (Math.random()*3+2).toFixed(2);
+    html += `<div class="star" style="left:${x}%;top:${y}%;width:${size}px;height:${size}px;animation-delay:${delay}s;animation-duration:${dur}s;"></div>`;
+  }
+  container.innerHTML = html;
+  starsGenerated = true;
 }
 
 function dbPath(code) { return ref(db, 'projects/' + code); }
@@ -386,6 +686,7 @@ function refreshAll() {
   refreshInfoBar();
   refreshTravelInfoBar();
   refreshMiniBar();
+  updateHostUI();
   // re-render current visible sub if needed
   const active = document.querySelector('.screen.active');
   if(!active) return;
@@ -414,7 +715,8 @@ window.createProject = async function() {
     name, code, password: pw, start, end,
     place:'', members:[], transport:'', themes:[],
     accommodations:[], funList:[], schedule:[],
-    memo:'', packList:[], outfit:'', outfitMemo:''
+    memo:'', packList:[], outfit:'', outfitMemo:'',
+    budget:'', hostUid: currentUser ? currentUser.uid : null
   };
   try {
     await set(ref(db, 'projects/' + code), newProject);
@@ -433,6 +735,13 @@ function enterProject() {
   updateAllHeaders();
   refreshInfoBar();
   refreshTravelInfoBar();
+  registerMember(projectCode);
+  attachPresence(projectCode);
+  attachMembersListener(projectCode);
+  attachTypingListener(projectCode);
+  attachChatListener(projectCode);
+  setChatVisible(true);
+  updateHostUI();
   showMain('plan');
 }
 
@@ -1114,11 +1423,184 @@ function updateStatusBadge(type){
   .guide-section{margin-bottom:16px;}
   .guide-title{font-size:14px;font-weight:800;color:#FF8C42;margin-bottom:6px;}
   .guide-body{font-size:13px;color:#666;line-height:1.7;}
+
+  /* LOGOUT BUTTON */
+  .header-mini-btn.logout-btn{background:#FFE8E8;color:#e74c3c;font-weight:700;}
+  .header-mini-btn.logout-btn:hover{background:#FFD6D6;}
+
+  /* INVITE BANNER */
+  .invite-banner-btn{width:100%;padding:14px;border:none;border-radius:var(--radius);font-size:15px;font-weight:800;color:#fff;cursor:pointer;background:linear-gradient(135deg,#FF8C42,#FF5E8E);box-shadow:0 4px 14px rgba(255,94,142,.35);margin-bottom:16px;transition:all .2s;}
+  .invite-banner-btn:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(255,94,142,.45);}
+  .invite-banner-btn.travel{background:linear-gradient(135deg,#4A90D9,#7B5EFF);box-shadow:0 4px 14px rgba(123,94,255,.35);}
+  .invite-banner-btn.travel:hover{box-shadow:0 6px 20px rgba(123,94,255,.45);}
+
+  /* MEMBERS */
+  .members-section{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:16px;}
+  .members-section-title{font-size:13px;font-weight:800;color:#888;margin-bottom:10px;}
+  .members-list{display:flex;flex-wrap:wrap;gap:10px;}
+  .member-chip{display:flex;align-items:center;gap:6px;background:#FFF8F2;border-radius:50px;padding:5px 12px 5px 5px;font-size:12px;font-weight:600;color:#555;}
+  .member-avatar{width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0;}
+  .member-name{white-space:nowrap;}
+  .member-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;}
+  .member-dot.online{background:#4CAF50;box-shadow:0 0 0 2px rgba(76,175,80,.2);}
+  .member-dot.offline{background:#ccc;}
+
+  /* DANGER BUTTON */
+  .danger-btn{width:100%;padding:14px;border:2px solid #ffb3b3;background:#FFF0F0;color:#e74c3c;border-radius:var(--radius);font-size:14px;font-weight:700;cursor:pointer;margin-top:24px;transition:all .2s;}
+  .danger-btn:hover{background:#ffe0e0;}
+
+  /* TOGGLE SWITCH */
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;background:#FFF8F2;border-radius:var(--radius-sm);padding:12px 14px;font-size:13px;color:#666;font-weight:600;}
+  .switch{position:relative;display:inline-block;width:46px;height:26px;flex-shrink:0;}
+  .switch input{opacity:0;width:0;height:0;}
+  .slider{position:absolute;cursor:pointer;inset:0;background:#ddd;border-radius:50px;transition:.2s;}
+  .slider:before{position:absolute;content:"";height:20px;width:20px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s;}
+  .switch input:checked + .slider{background:#FF8C42;}
+  .switch input:checked + .slider:before{transform:translateX(20px);}
+
+  /* THEME SELECTOR */
+  .theme-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px;}
+  .theme-option{cursor:pointer;border:3px solid transparent;border-radius:var(--radius-sm);padding:6px;text-align:center;transition:all .15s;}
+  .theme-option:hover{transform:translateY(-2px);}
+  .theme-option.selected{border-color:#FF8C42;}
+  .theme-preview{width:100%;height:50px;border-radius:8px;margin-bottom:6px;position:relative;overflow:hidden;}
+  .theme-preview-default{background:linear-gradient(135deg,#FFE5CC,#FFB380);}
+  .theme-preview-dark{background:linear-gradient(135deg,#1a1230,#3d1f6b);}
+  .theme-preview-dark::after{content:'✦ ⋆ ✦ ⋆';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;opacity:.7;letter-spacing:4px;}
+  .theme-preview-summer{background:linear-gradient(135deg,#A8D8FF,#FFD0E8);}
+  .theme-option-label{font-size:11px;font-weight:700;color:#888;}
+
+  /* THEME BACKGROUNDS */
+  .theme-bg{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;display:none;}
+  .theme-bg.active{display:block;}
+  #theme-bg-stars{background:#100a20;}
+  .star{position:absolute;background:#fff;border-radius:50%;animation:twinkle ease-in-out infinite;}
+  @keyframes twinkle{0%,100%{opacity:0;}50%{opacity:1;}}
+  #theme-bg-summer{background:linear-gradient(135deg,#cfe8ff,#ffe4ef);}
+  .summer-blob{position:absolute;border-radius:50%;filter:blur(60px);opacity:.55;animation:floatBlob ease-in-out infinite;}
+  .blob1{width:300px;height:300px;background:#4A90D9;top:-60px;left:-60px;animation-duration:20s;}
+  .blob2{width:260px;height:260px;background:#FFB3D1;top:40%;right:-70px;animation-duration:24s;animation-delay:-4s;}
+  .blob3{width:220px;height:220px;background:#A8D8FF;bottom:-70px;left:30%;animation-duration:28s;animation-delay:-9s;}
+  @keyframes floatBlob{0%,100%{transform:translate(0,0) scale(1);}50%{transform:translate(40px,-30px) scale(1.15);}}
+
+  /* TYPING INDICATOR */
+  .typing-indicator{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:rgba(0,0,0,.75);color:#fff;padding:8px 18px;border-radius:50px;font-size:12px;font-weight:600;z-index:550;opacity:0;pointer-events:none;white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis;transition:opacity .2s;}
+  .typing-indicator.show{opacity:1;animation:blinkFade 1.4s ease-in-out infinite;}
+  @keyframes blinkFade{0%,100%{opacity:.55;}50%{opacity:1;}}
+
+  /* CHAT */
+  .chat-fab{position:fixed;bottom:20px;right:20px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#FF8C42,#FF5E8E);color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.2);z-index:500;display:none;align-items:center;justify-content:center;transition:transform .2s;}
+  .chat-fab:hover{transform:scale(1.08);}
+  .chat-panel{position:fixed;top:0;right:-360px;width:340px;max-width:90vw;height:100%;background:#fff;box-shadow:-4px 0 20px rgba(0,0,0,.15);z-index:600;display:flex;flex-direction:column;transition:right .25s ease;}
+  .chat-panel.open{right:0;}
+  .chat-panel-header{display:flex;justify-content:space-between;align-items:center;padding:16px;border-bottom:1px solid #FFF0E5;flex-shrink:0;}
+  .chat-panel-title{font-size:15px;font-weight:800;color:#FF8C42;}
+  .chat-messages{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px;}
+  .chat-empty{text-align:center;color:#bbb;font-size:13px;padding:30px 10px;}
+  .chat-msg{display:flex;gap:8px;align-items:flex-start;}
+  .chat-msg.mine{flex-direction:row-reverse;}
+  .chat-avatar{width:30px;height:30px;border-radius:50%;object-fit:cover;flex-shrink:0;}
+  .chat-bubble-wrap{max-width:75%;}
+  .chat-msg.mine .chat-bubble-wrap{text-align:right;}
+  .chat-name{font-size:11px;color:#aaa;margin-bottom:2px;}
+  .chat-bubble{background:#FFF3E8;border-radius:14px;padding:8px 12px;font-size:13px;color:#444;line-height:1.5;word-break:break-word;display:inline-block;text-align:left;}
+  .chat-msg.mine .chat-bubble{background:#FF8C42;color:#fff;}
+  .chat-input-row{display:flex;gap:8px;padding:12px;border-top:1px solid #FFF0E5;flex-shrink:0;}
+  .chat-input-row input{flex:1;padding:10px 14px;border:2px solid #FFE0C8;border-radius:50px;font-size:13px;outline:none;font-family:inherit;}
+  .chat-input-row input:focus{border-color:#FF8C42;}
+  .chat-send-btn{padding:10px 16px;background:#FF8C42;color:#fff;border:none;border-radius:50px;font-size:13px;font-weight:700;cursor:pointer;}
+  @media(max-width:600px){
+    .chat-panel{right:auto;left:0;top:auto;bottom:-75%;width:100%;max-width:100vw;height:75%;border-radius:20px 20px 0 0;transition:bottom .25s ease;}
+    .chat-panel.open{bottom:0;}
+    .chat-fab{bottom:24px;right:16px;}
+    .typing-indicator{bottom:88px;}
+  }
+
+  /* ══════════ DARK NIGHT THEME ══════════ */
+  [data-theme="dark"] body,[data-theme="dark"] body.travel-mode{background:transparent;}
+  [data-theme="dark"] #screen-loading,[data-theme="dark"] #screen-login,[data-theme="dark"] #screen-profile-setup,[data-theme="dark"] #screen-settings,[data-theme="dark"] #screen-create{background:transparent;}
+  [data-theme="dark"] .app-header,[data-theme="dark"] .menu-card,[data-theme="dark"] .acc-card,[data-theme="dark"] .create-box,[data-theme="dark"] .join-box,[data-theme="dark"] .modal,[data-theme="dark"] .info-form,[data-theme="dark"] .memo-box,[data-theme="dark"] .confirmed-display,[data-theme="dark"] .schedule-day,[data-theme="dark"] .check-item,[data-theme="dark"] .compare-table,[data-theme="dark"] .random-box,[data-theme="dark"] .join-box-inline,[data-theme="dark"] .project-card,[data-theme="dark"] .empty-hint,[data-theme="dark"] .outfit-card,[data-theme="dark"] .members-section,[data-theme="dark"] .chat-panel,[data-theme="dark"] .share-code-display,[data-theme="dark"] .member-chip,[data-theme="dark"] .toggle-row{
+    background:rgba(35,25,60,.78); color:#e6d6ff; box-shadow:0 4px 20px rgba(0,0,0,.4);
+  }
+  [data-theme="dark"] .compare-table td{color:#ddd;border-bottom-color:rgba(255,255,255,.08);}
+  [data-theme="dark"] .compare-table tr:hover td{background:rgba(255,255,255,.04);}
+  [data-theme="dark"] .compare-table th{background:#7b2ff7;}
+  [data-theme="dark"] .header-project,[data-theme="dark"] .header-project.travel,[data-theme="dark"] .section-title,[data-theme="dark"] .sub-page-title,[data-theme="dark"] .acc-card-title,[data-theme="dark"] .project-card-name,[data-theme="dark"] .schedule-text,[data-theme="dark"] .check-item label,[data-theme="dark"] .confirmed-value,[data-theme="dark"] #dash-nickname,[data-theme="dark"] .home-title,[data-theme="dark"] .create-box h2,[data-theme="dark"] .join-box h2,[data-theme="dark"] .members-section-title,[data-theme="dark"] .chat-panel-title{
+    color:#e6d6ff;
+  }
+  [data-theme="dark"] .menu-card .card-label,[data-theme="dark"] .card-status,[data-theme="dark"] .acc-card-price,[data-theme="dark"] .project-card-meta,[data-theme="dark"] .home-sub,[data-theme="dark"] .form-group label,[data-theme="dark"] .guide-body,[data-theme="dark"] .schedule-time,[data-theme="dark"] .acc-note-tag,[data-theme="dark"] .confirmed-sub,[data-theme="dark"] .code-hint,[data-theme="dark"] .member-name,[data-theme="dark"] .chat-name{
+    color:#b8a8d8;
+  }
+  [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .acc-note-tag{
+    background:rgba(155,77,255,.18);color:#d3b8ff;
+  }
+  [data-theme="dark"] .header-mini-btn.logout-btn{background:rgba(255,94,94,.18);color:#ff9a9a;}
+  [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input{
+    background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);
+  }
+  [data-theme="dark"] .form-group input::placeholder,[data-theme="dark"] .memo-textarea::placeholder,[data-theme="dark"] .chat-input-row input::placeholder{color:#8d7caa;}
+  [data-theme="dark"] .btn-orange,[data-theme="dark"] .save-btn,[data-theme="dark"] .spin-btn,[data-theme="dark"] .small-btn,[data-theme="dark"] .acc-btn-confirm,[data-theme="dark"] .chat-send-btn{
+    background:linear-gradient(135deg,#7b2ff7,#a855f7); color:#fff;
+  }
+  [data-theme="dark"] .btn-outline{background:transparent;color:#c9a8ff;border-color:#7b2ff7;}
+  [data-theme="dark"] .back-btn,[data-theme="dark"] .back-btn.travel{background:rgba(155,77,255,.18);color:#d3b8ff;}
+  [data-theme="dark"] .toast{background:#2a1f44;}
+  [data-theme="dark"] .invite-banner-btn,[data-theme="dark"] .invite-banner-btn.travel{background:linear-gradient(135deg,#7b2ff7,#ff6ec7);box-shadow:0 4px 14px rgba(123,47,247,.4);}
+  [data-theme="dark"] .chat-bubble{background:rgba(155,77,255,.18);color:#e6d6ff;}
+  [data-theme="dark"] .chat-msg.mine .chat-bubble{background:#7b2ff7;color:#fff;}
+  [data-theme="dark"] .acc-btn-edit{background:rgba(255,255,255,.08);color:#cbb8e6;}
+  [data-theme="dark"] .acc-photo,[data-theme="dark"] .project-card-thumb{background:rgba(155,77,255,.12);}
+  [data-theme="dark"] .danger-btn{background:rgba(231,76,60,.12);border-color:rgba(231,76,60,.4);color:#ff8f8f;}
+  [data-theme="dark"] .theme-option.selected{border-color:#a855f7;}
+
+  /* ══════════ BLUE SUMMER THEME ══════════ */
+  [data-theme="summer"] body,[data-theme="summer"] body.travel-mode{background:transparent;}
+  [data-theme="summer"] #screen-loading,[data-theme="summer"] #screen-login,[data-theme="summer"] #screen-profile-setup,[data-theme="summer"] #screen-settings,[data-theme="summer"] #screen-create{background:transparent;}
+  [data-theme="summer"] .app-header,[data-theme="summer"] .menu-card,[data-theme="summer"] .acc-card,[data-theme="summer"] .create-box,[data-theme="summer"] .join-box,[data-theme="summer"] .modal,[data-theme="summer"] .info-form,[data-theme="summer"] .memo-box,[data-theme="summer"] .confirmed-display,[data-theme="summer"] .schedule-day,[data-theme="summer"] .check-item,[data-theme="summer"] .compare-table,[data-theme="summer"] .random-box,[data-theme="summer"] .join-box-inline,[data-theme="summer"] .project-card,[data-theme="summer"] .empty-hint,[data-theme="summer"] .outfit-card,[data-theme="summer"] .members-section,[data-theme="summer"] .chat-panel,[data-theme="summer"] .share-code-display,[data-theme="summer"] .member-chip,[data-theme="summer"] .toggle-row{
+    background:rgba(255,255,255,.8);
+  }
+  [data-theme="summer"] .header-project,[data-theme="summer"] .header-project.travel,[data-theme="summer"] .section-title,[data-theme="summer"] .sub-page-title,[data-theme="summer"] .home-title,[data-theme="summer"] .create-box h2,[data-theme="summer"] .join-box h2{
+    color:#2E7FD9;
+  }
+  [data-theme="summer"] .info-chip{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .info-chip.travel,[data-theme="summer"] .header-code.travel{background:rgba(255,143,193,.22);color:#d6589e;}
+  [data-theme="summer"] .header-code{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .tag{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .btn-orange,[data-theme="summer"] .save-btn,[data-theme="summer"] .spin-btn,[data-theme="summer"] .acc-btn-confirm,[data-theme="summer"] .chat-send-btn{
+    background:linear-gradient(135deg,#4A90D9,#FF8FC1); color:#fff;
+  }
+  [data-theme="summer"] .save-btn.travel{background:linear-gradient(135deg,#4A90D9,#7B5EFF);}
+  [data-theme="summer"] .invite-banner-btn,[data-theme="summer"] .invite-banner-btn.travel{background:linear-gradient(135deg,#4A90D9,#FFB3D1);box-shadow:0 4px 14px rgba(74,144,217,.35);}
+  [data-theme="summer"] .chat-bubble{background:rgba(74,144,217,.12);color:#2a5d8f;}
+  [data-theme="summer"] .chat-msg.mine .chat-bubble{background:#4A90D9;color:#fff;}
+  [data-theme="summer"] .theme-option.selected{border-color:#4A90D9;}
 </style>
 </head>
 <body>
 
+<div id="theme-bg-stars" class="theme-bg"></div>
+<div id="theme-bg-summer" class="theme-bg">
+  <div class="summer-blob blob1"></div>
+  <div class="summer-blob blob2"></div>
+  <div class="summer-blob blob3"></div>
+</div>
+
 <div class="toast" id="toast"></div>
+<div class="typing-indicator" id="typing-indicator"></div>
+
+<!-- CHAT -->
+<button class="chat-fab" id="chat-fab" onclick="toggleChatPanel()">💬</button>
+<div class="chat-panel" id="chat-panel">
+  <div class="chat-panel-header">
+    <div class="chat-panel-title">💬 실시간 채팅</div>
+    <button class="close-btn" onclick="toggleChatPanel()">✕</button>
+  </div>
+  <div class="chat-messages" id="chat-messages"></div>
+  <div class="chat-input-row">
+    <input type="text" id="chat-input" placeholder="메시지 입력..." onkeydown="if(event.key==='Enter'){sendChatMessage();}">
+    <button class="chat-send-btn" onclick="sendChatMessage()">전송</button>
+  </div>
+</div>
 
 <!-- LOADING -->
 <div class="screen active" id="screen-loading">
@@ -1174,7 +1656,7 @@ function updateStatusBadge(type){
       <div style="display:flex;gap:8px;align-items:center;">
         <button class="header-mini-btn" onclick="openSettings()">⚙️ 설정</button>
         <button class="header-mini-btn" onclick="openGuideModal()">📖 이용방법</button>
-        <button class="header-mini-btn" onclick="logout()">🚪</button>
+        <button class="header-mini-btn logout-btn" onclick="logout()">로그아웃</button>
       </div>
     </div>
   </div>
@@ -1208,6 +1690,30 @@ function updateStatusBadge(type){
       <div class="form-group">
         <label>🖼️ 프로필 아바타</label>
         <div class="avatar-grid" id="settings-avatar-grid"></div>
+      </div>
+      <div class="form-group">
+        <label>🔊 효과음</label>
+        <div class="toggle-row">
+          <span>버튼 클릭 효과음</span>
+          <label class="switch"><input type="checkbox" id="settings-sound" onchange="toggleSoundSetting()"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>🎨 테마</label>
+        <div class="theme-grid">
+          <div class="theme-option" data-theme-id="default" onclick="selectThemeOption('default')">
+            <div class="theme-preview theme-preview-default"></div>
+            <div class="theme-option-label">기본</div>
+          </div>
+          <div class="theme-option" data-theme-id="dark" onclick="selectThemeOption('dark')">
+            <div class="theme-preview theme-preview-dark"></div>
+            <div class="theme-option-label">다크 나이트</div>
+          </div>
+          <div class="theme-option" data-theme-id="summer" onclick="selectThemeOption('summer')">
+            <div class="theme-preview theme-preview-summer"></div>
+            <div class="theme-option-label">푸르른 여름</div>
+          </div>
+        </div>
       </div>
       <button class="btn-main btn-orange" style="width:100%;" onclick="saveSettings()">💾 저장하기</button>
     </div>
@@ -1256,6 +1762,11 @@ function updateStatusBadge(type){
     </div>
   </div>
   <div class="main-content">
+    <button class="invite-banner-btn" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
+    <div class="members-section">
+      <div class="members-section-title">👥 참여 중인 멤버</div>
+      <div class="members-list" id="members-list-plan"></div>
+    </div>
     <div class="section-title">🌟 플래닝 메뉴</div>
     <div class="card-grid">
       <div class="menu-card" onclick="playSound('pop');showSub('sub-info')"><div class="card-icon">📋</div><div class="card-label">기본 정보</div><div class="card-status" id="status-info">미입력</div></div>
@@ -1267,6 +1778,7 @@ function updateStatusBadge(type){
       <div class="menu-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물</div><div class="card-status" id="status-pack">0개</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-outfit')"><div class="card-icon">👗</div><div class="card-label">옷차림·컨셉</div><div class="card-status" id="status-outfit">미정</div></div>
     </div>
+    <button class="danger-btn host-only-delete" style="display:none;" onclick="openDeleteConfirm()">🗑️ 프로젝트 삭제하기 (방장 전용)</button>
   </div>
 </div>
 
@@ -1507,6 +2019,11 @@ function updateStatusBadge(type){
     </div>
   </div>
   <div class="main-content">
+    <button class="invite-banner-btn travel" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
+    <div class="members-section">
+      <div class="members-section-title">👥 참여 중인 멤버</div>
+      <div class="members-list" id="members-list-travel"></div>
+    </div>
     <div class="section-title">🧳 트레블 메뉴</div>
     <div class="card-grid">
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-summary')"><div class="card-icon">📋</div><div class="card-label">플랜 요약</div></div>
@@ -1709,7 +2226,23 @@ function updateStatusBadge(type){
     </div>
     <div class="guide-section">
       <div class="guide-title">6️⃣ 프로필 설정 변경하기</div>
-      <div class="guide-body">대시보드 상단의 <b>⚙️ 설정</b> 버튼을 누르면 닉네임과 프로필 아바타를 언제든지 자유롭게 수정할 수 있어요.</div>
+      <div class="guide-body">대시보드 상단의 <b>⚙️ 설정</b> 버튼을 누르면 닉네임, 프로필 아바타, 효과음 on/off, 테마를 언제든지 자유롭게 수정할 수 있어요.</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">7️⃣ 방장 권한 &amp; 참여자 목록</div>
+      <div class="guide-body">프로젝트를 처음 만든 사람은 <b>방장(👑)</b>이 돼요. 방 안에는 현재 참여 중인 멤버들의 닉네임과 아바타가 표시되고, 초록불은 온라인, 회색불은 오프라인 상태예요. 방장 화면에는 <b>🗑️ 프로젝트 삭제</b> 버튼이 추가로 보이며, 누르면 해당 프로젝트가 영구적으로 삭제돼요.</div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: DELETE CONFIRM -->
+<div class="modal-overlay hidden" id="modal-delete">
+  <div class="modal">
+    <h3>⚠️ 프로젝트 삭제 <button class="close-btn" onclick="closeModal('modal-delete')">✕</button></h3>
+    <div style="font-size:14px;color:#666;line-height:1.7;margin-bottom:18px;">이 프로젝트의 모든 데이터(숙소, 일정, 놀거리, 메모 등)가 <b style="color:#e74c3c;">영구적으로 삭제</b>되며, 되돌릴 수 없어요. 정말 삭제하시겠어요?</div>
+    <div style="display:flex;gap:8px;">
+      <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-delete')">취소</button>
+      <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmDeleteProject()">🗑️ 영구 삭제</button>
     </div>
   </div>
 </div>
