@@ -65,6 +65,23 @@ function showToast(msg) {
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2800);
 }
+// Repairs legacy/corrupted data where 'members' or 'themes' (string arrays
+// for 기본정보) accidentally got overwritten as an object.
+function sanitizeProject(p) {
+  if(!p) return p;
+  ['members','themes'].forEach(f => {
+    const v = p[f];
+    if(v == null) { p[f] = []; }
+    else if(!Array.isArray(v)) {
+      if(typeof v === 'object') {
+        p[f] = Object.values(v).filter(x => typeof x === 'string');
+      } else {
+        p[f] = [];
+      }
+    }
+  });
+  return p;
+}
 
 // ══ SOUND EFFECTS ══
 const soundCtx = { ctx: null };
@@ -298,7 +315,7 @@ window.openProjectFromDashboard = async function(code) {
   try {
     const snap = await get(ref(db, 'projects/' + code));
     if(!snap.exists()) { showToast('❌ 프로젝트를 찾을 수 없어요'); return; }
-    project = snap.val();
+    project = sanitizeProject(snap.val());
     projectCode = code;
     attachListener(code);
     enterProject();
@@ -327,7 +344,7 @@ window.dashboardJoin = async function() {
     const data = snap.val();
     if(data.password && data.password !== pw) { showToast('🔒 비밀번호가 틀렸어요!'); return; }
     await registerProjectToUser(code);
-    project = data; projectCode = code;
+    project = sanitizeProject(data); projectCode = code;
     attachListener(code);
     enterProject();
     playSound('coin');
@@ -347,7 +364,7 @@ async function registerProjectToUser(code) {
 async function registerMember(code) {
   if(!currentUser || !userProfile || !code) return;
   try {
-    await update(ref(db, `projects/${code}/members/${currentUser.uid}`), {
+    await update(ref(db, `projects/${code}/participants/${currentUser.uid}`), {
       nickname: userProfile.nickname || '여행자',
       photo: userProfile.photo || AVATAR_LIST[0]
     });
@@ -378,7 +395,7 @@ function detachPresence() {
 function attachMembersListener(code) {
   detachMembersDataListeners();
   if(!code) return;
-  const mRef = ref(db, `projects/${code}/members`);
+  const mRef = ref(db, `projects/${code}/participants`);
   const pRef = ref(db, `projects/${code}/presence`);
   membersDataListener = mRef;
   presenceDataListener = pRef;
@@ -675,7 +692,7 @@ function attachListener(code) {
     if(isRemoteUpdate) return;
     const data = snap.val();
     if(!data) return;
-    project = data;
+    project = sanitizeProject(data);
     refreshAll();
     showToast('🔄 실시간 업데이트!');
   });
