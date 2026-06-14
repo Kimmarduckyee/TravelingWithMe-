@@ -3,10 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🌏 TravelingWithMe!</title>
+<title>🌏 여행 플래너</title>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, set, get, update, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDZJoUYpHGdeH1e98y905Ne3lVLPorBUkI",
@@ -21,6 +22,8 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
+const auth = getAuth(app);
+const googleProvider = new GoogleAuthProvider();
 
 // ══ STATE ══
 let project = null;
@@ -33,6 +36,11 @@ let funTempPhotos = [];
 let editingAccIdx = null, editingFunIdx = null;
 let miniBarState = {};
 let dragAccIdx = null;
+let currentUser = null;
+let userProfile = null;
+let selectedAvatar = null;
+const AVATAR_LIST = ['Profile_1_hearts.png','profile_2_dumb.png','profile_3_tease.png','profile_4_smirk.png','profile_5_Cat.png','profile_6_Dev.png'];
+const AVATAR_PATH = './Profile/';
 
 // ══ HELPERS ══
 function genCode() {
@@ -130,7 +138,186 @@ function showScreen(id) {
 }
 function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
 
-// ══ DB ══
+// ══ AUTH ══
+window.signInWithGoogle = async function() {
+  try {
+    playSound('click');
+    await signInWithPopup(auth, googleProvider);
+  } catch(e) {
+    showToast('⚠️ 로그인 실패: ' + e.message);
+  }
+}
+window.logout = async function() {
+  if(dbListener) { off(dbListener); dbListener = null; }
+  project = null; projectCode = null;
+  try { await signOut(auth); } catch(e) {}
+  showToast('👋 로그아웃 되었습니다');
+}
+
+onAuthStateChanged(auth, async (user) => {
+  if(user) {
+    currentUser = user;
+    await loadUserProfile();
+  } else {
+    currentUser = null;
+    userProfile = null;
+    showScreen('screen-login');
+  }
+});
+
+async function loadUserProfile() {
+  try {
+    const snap = await get(ref(db, 'users/' + currentUser.uid));
+    if(snap.exists() && snap.val().nickname) {
+      userProfile = snap.val();
+      if(!userProfile.projects) userProfile.projects = {};
+      showDashboard();
+    } else {
+      userProfile = (snap.exists() ? snap.val() : {}) || {};
+      if(!userProfile.projects) userProfile.projects = {};
+      showProfileSetup();
+    }
+  } catch(e) {
+    showToast('⚠️ 프로필 로드 오류: ' + e.message);
+  }
+}
+
+// ══ PROFILE SETUP ══
+function showProfileSetup() {
+  showScreen('screen-profile-setup');
+  selectedAvatar = (userProfile && userProfile.photo) || null;
+  setValue('profile-nickname', (userProfile && userProfile.nickname) || (currentUser && currentUser.displayName) || '');
+  renderAvatarGrid();
+  document.querySelectorAll('.avatar-option').forEach(a=>a.classList.remove('selected'));
+  if(selectedAvatar) {
+    const idx = AVATAR_LIST.indexOf(selectedAvatar);
+    if(idx >= 0) {
+      const opts = document.querySelectorAll('.avatar-option');
+      if(opts[idx]) opts[idx].classList.add('selected');
+    }
+  }
+}
+window.renderAvatarGrid = function() {
+  const grid = document.getElementById('avatar-grid');
+  if(!grid || grid.children.length) return;
+  grid.innerHTML = AVATAR_LIST.map(f =>
+    `<div class="avatar-option" onclick="selectAvatar(this,'${f}')"><img src="${AVATAR_PATH}${f}" alt="${f}" onerror="this.parentElement.style.display='none'"></div>`
+  ).join('');
+}
+window.selectAvatar = function(el, filename) {
+  document.querySelectorAll('.avatar-option').forEach(a=>a.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedAvatar = filename;
+  playSound('pop');
+}
+window.saveProfile = async function() {
+  const nickname = document.getElementById('profile-nickname').value.trim();
+  if(!nickname) { showToast('닉네임을 입력해주세요!'); return; }
+  if(!selectedAvatar) { showToast('프로필 아바타를 선택해주세요!'); return; }
+  try {
+    userProfile = { nickname, photo: selectedAvatar, projects: (userProfile && userProfile.projects) || {} };
+    await set(ref(db, 'users/' + currentUser.uid), userProfile);
+    playSound('save');
+    showToast('✅ 프로필 설정 완료!');
+    showDashboard();
+  } catch(e) {
+    showToast('⚠️ 저장 실패: ' + e.message);
+  }
+}
+
+// ══ DASHBOARD ══
+function getPhotoUrl(photo) {
+  return AVATAR_PATH + (photo || AVATAR_LIST[0]);
+}
+function showDashboard() {
+  showScreen('screen-dashboard');
+  if(!userProfile) return;
+  setText('dash-nickname', userProfile.nickname || '여행자');
+  const img = document.getElementById('dash-avatar');
+  if(img) img.src = getPhotoUrl(userProfile.photo);
+  renderProjectList();
+}
+async function renderProjectList() {
+  const list = document.getElementById('dashboard-project-list');
+  if(!list) return;
+  const codes = Object.keys((userProfile && userProfile.projects) || {});
+  if(!codes.length) {
+    list.innerHTML = '<div class="empty-hint">아직 참여한 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
+    return;
+  }
+  list.innerHTML = '<div class="empty-hint">불러오는 중... 🔄</div>';
+  const cards = [];
+  for(const code of codes) {
+    try {
+      const snap = await get(ref(db, 'projects/' + code));
+      if(snap.exists()) cards.push({ code, p: snap.val() });
+    } catch(e) {}
+  }
+  if(!cards.length) {
+    list.innerHTML = '<div class="empty-hint">아직 참여한 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
+    return;
+  }
+  list.innerHTML = cards.map(({code,p}) => `
+    <div class="project-card" onclick="playSound('pop');openProjectFromDashboard('${code}')">
+      <div class="project-card-thumb">✈️</div>
+      <div class="project-card-info">
+        <div class="project-card-name">${p.name||'이름 없는 여행'}</div>
+        <div class="project-card-meta">📍 ${p.place||'장소 미정'}</div>
+        <div class="project-card-meta">📅 ${p.start ? p.start + (p.end?' ~ '+p.end:'') : '날짜 미정'}</div>
+        <div class="project-card-code">${code}</div>
+      </div>
+    </div>`).join('');
+}
+window.openProjectFromDashboard = async function(code) {
+  try {
+    const snap = await get(ref(db, 'projects/' + code));
+    if(!snap.exists()) { showToast('❌ 프로젝트를 찾을 수 없어요'); return; }
+    project = snap.val();
+    projectCode = code;
+    attachListener(code);
+    enterProject();
+    playSound('travel');
+  } catch(e) { showToast('⚠️ 오류: ' + e.message); }
+}
+window.goToDashboard = function() {
+  if(dbListener) { off(dbListener); dbListener = null; }
+  project = null; projectCode = null;
+  playSound('click');
+  showDashboard();
+}
+window.dashboardJoin = async function() {
+  const code = document.getElementById('dash-j-code').value.trim().toUpperCase();
+  const pw = document.getElementById('dash-j-pw').value;
+  if(!code) { showToast('코드를 입력해주세요!'); return; }
+  showToast('🔍 프로젝트 찾는 중...');
+  try {
+    const snap = await get(ref(db, 'projects/' + code));
+    if(!snap.exists()) { showToast('❌ 존재하지 않는 코드예요!'); return; }
+    const data = snap.val();
+    if(data.password && data.password !== pw) { showToast('🔒 비밀번호가 틀렸어요!'); return; }
+    await registerProjectToUser(code);
+    project = data; projectCode = code;
+    attachListener(code);
+    enterProject();
+    playSound('coin');
+    showToast('✅ 참여 완료!');
+  } catch(e) { showToast('⚠️ 오류: ' + e.message); }
+}
+async function registerProjectToUser(code) {
+  if(!currentUser) return;
+  try {
+    await set(ref(db, `users/${currentUser.uid}/projects/${code}`), true);
+    if(!userProfile.projects) userProfile.projects = {};
+    userProfile.projects[code] = true;
+  } catch(e) {}
+}
+
+// ══ GUIDE MODAL ══
+window.openGuideModal = function() {
+  playSound('pop');
+  document.getElementById('modal-guide').classList.remove('hidden');
+}
+
 function dbPath(code) { return ref(db, 'projects/' + code); }
 
 async function saveProject() {
@@ -193,6 +380,7 @@ window.createProject = async function() {
   };
   try {
     await set(ref(db, 'projects/' + code), newProject);
+    await registerProjectToUser(code);
     project = newProject;
     projectCode = code;
     attachListener(code);
@@ -201,26 +389,7 @@ window.createProject = async function() {
   } catch(e) { showToast('⚠️ 생성 실패: ' + e.message); }
 }
 
-// ══ JOIN ══
-window.joinProject = async function() {
-  const code = document.getElementById('j-code').value.trim().toUpperCase();
-  const pw = document.getElementById('j-pw').value;
-  if(!code) { showToast('코드를 입력해주세요!'); return; }
-  showToast('🔍 프로젝트 찾는 중...');
-  try {
-    const snap = await get(ref(db, 'projects/' + code));
-    if(!snap.exists()) { showToast('❌ 존재하지 않는 코드예요!'); return; }
-    const data = snap.val();
-    if(data.password && data.password !== pw) {
-      showToast('🔒 비밀번호가 틀렸어요!'); return;
-    }
-    project = data;
-    projectCode = code;
-    attachListener(code);
-    enterProject();
-    showToast('✅ 참여 완료!');
-  } catch(e) { showToast('⚠️ 오류: ' + e.message); }
-}
+// ══ JOIN ══ (dashboardJoin in AUTH/DASHBOARD section handles joining now)
 
 function enterProject() {
   updateAllHeaders();
@@ -669,7 +838,7 @@ window.copyCode=function(){
 }
 window.copyInviteMsg=function(){
   const name=document.getElementById('invite-name').value||'친구';
-  const msg = `${name}야! 나랑 같이 여행 계획 짜자~! 🌏\nTravelingWithMe!에서 코드 입력해줘: ${project.code}\n\n사이트 주소: https://kimmarduckyee.github.io/TravelingWithMe-/\n사용방법: https://happyhobby.creatorlink.net/forum/view/1489773`;
+  const msg=`${name}야! 나랑 같이 여행 계획 짜자~! 🌏\n여행 플래너에서 코드 입력해줘: ${project.code}`;
   navigator.clipboard.writeText(msg).catch(()=>{});
   showToast('📤 초대 메시지 복사!');
 }
@@ -695,7 +864,7 @@ function updateStatusBadge(type){
   .screen.active{display:flex;flex-direction:column;}
 
   /* HOME */
-  #screen-home{align-items:center;justify-content:center;background:linear-gradient(135deg,#FFF3E8,#FFE5CC);}
+  #screen-loading,#screen-login{align-items:center;justify-content:center;background:linear-gradient(135deg,#FFF3E8,#FFE5CC);}
   .home-logo{font-size:56px;margin-bottom:12px;}
   .home-title{font-size:28px;font-weight:800;color:#FF8C42;margin-bottom:6px;}
   .home-sub{color:#aaa;font-size:14px;margin-bottom:40px;}
@@ -868,29 +1037,128 @@ function updateStatusBadge(type){
   ::-webkit-scrollbar{width:6px;}
   ::-webkit-scrollbar-thumb{background:#FFD0B0;border-radius:10px;}
   @media(max-width:480px){.card-grid{grid-template-columns:1fr 1fr;}}
+
+  /* GOOGLE LOGIN BUTTON */
+  .btn-google{background:#fff;color:#555;border:2px solid #eee;display:flex;align-items:center;justify-content:center;}
+  .btn-google:hover{box-shadow:0 6px 20px rgba(0,0,0,.12);}
+
+  /* PROFILE SETUP */
+  #screen-profile-setup{background:linear-gradient(135deg,#FFF3E8,#FFE5CC);align-items:center;justify-content:center;}
+  .avatar-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px;}
+  .avatar-option{border:3px solid transparent;border-radius:50%;overflow:hidden;cursor:pointer;aspect-ratio:1/1;transition:all .15s;background:#FFF3E8;}
+  .avatar-option img{width:100%;height:100%;object-fit:cover;display:block;}
+  .avatar-option:hover{transform:scale(1.05);}
+  .avatar-option.selected{border-color:#FF8C42;box-shadow:0 0 0 3px rgba(255,140,66,.2);}
+
+  /* HEADER MINI BUTTON */
+  .header-mini-btn{background:#FFF3E8;border:none;border-radius:50%;width:32px;height:32px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#FF8C42;transition:all .2s;}
+  .header-mini-btn:hover{background:#FFE0C8;}
+  .header-mini-btn.travel{background:#E8F3FF;color:#4A90D9;}
+  .header-mini-btn.travel:hover{background:#D0E5FF;}
+  #screen-dashboard .header-mini-btn{width:auto;border-radius:50px;padding:6px 12px;font-size:12px;font-weight:700;}
+
+  /* DASHBOARD */
+  #screen-dashboard .app-header{background:#fff;}
+  .dash-actions{display:flex;flex-direction:column;gap:14px;}
+  .join-box-inline{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);}
+  .project-list{display:flex;flex-direction:column;gap:12px;}
+  .project-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);display:flex;align-items:center;gap:14px;cursor:pointer;transition:all .2s;border:2px solid transparent;}
+  .project-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(255,140,66,.15);border-color:#FFB380;}
+  .project-card-thumb{font-size:30px;width:54px;height:54px;border-radius:var(--radius-sm);background:#FFF3E8;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .project-card-info{flex:1;min-width:0;}
+  .project-card-name{font-size:15px;font-weight:800;color:#333;margin-bottom:4px;}
+  .project-card-meta{font-size:12px;color:#888;}
+  .project-card-code{font-size:11px;color:#FF8C42;font-weight:700;margin-top:4px;letter-spacing:1px;}
+  .empty-hint{text-align:center;color:#bbb;padding:30px 16px;font-size:14px;line-height:1.6;background:#fff;border-radius:var(--radius);box-shadow:var(--shadow-card);}
+
+  /* GUIDE MODAL */
+  .guide-section{margin-bottom:16px;}
+  .guide-title{font-size:14px;font-weight:800;color:#FF8C42;margin-bottom:6px;}
+  .guide-body{font-size:13px;color:#666;line-height:1.7;}
 </style>
 </head>
 <body>
 
 <div class="toast" id="toast"></div>
 
-<!-- HOME -->
-<div class="screen active" id="screen-home">
+<!-- LOADING -->
+<div class="screen active" id="screen-loading">
   <div style="text-align:center;padding:20px;">
     <div class="home-logo">🌏</div>
-    <div class="home-title">TravelingWithMe!</div>
+    <div class="home-title">여행 플래너</div>
+    <div class="home-sub">불러오는 중... 🔄</div>
+  </div>
+</div>
+
+<!-- LOGIN -->
+<div class="screen" id="screen-login">
+  <div style="text-align:center;padding:20px;">
+    <div class="home-logo">🌏</div>
+    <div class="home-title">여행 플래너</div>
     <div class="home-sub">함께 계획하고, 함께 떠나요!</div>
     <div class="home-btns" style="margin:0 auto;">
-      <button class="btn-main btn-orange" onclick="playSound('travel');showScreen('screen-create')">✨ 새 프로젝트 만들기</button>
-      <button class="btn-main btn-outline" onclick="playSound('click');showScreen('screen-join')">🔑 코드로 참여하기</button>
+      <button class="btn-main btn-google" onclick="signInWithGoogle()">
+        <svg width="20" height="20" viewBox="0 0 48 48" style="vertical-align:-4px;margin-right:8px;"><path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/><path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/><path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/><path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/></svg>
+        Google로 로그인
+      </button>
     </div>
+  </div>
+</div>
+
+<!-- PROFILE SETUP -->
+<div class="screen" id="screen-profile-setup">
+  <div style="padding:16px;max-width:460px;width:100%;margin:0 auto;">
+    <div class="create-box">
+      <h2>👋 처음이시네요!</h2>
+      <div style="text-align:center;font-size:13px;color:#aaa;margin-bottom:20px;">닉네임과 프로필 아바타를 설정해주세요</div>
+      <div class="form-group">
+        <label>닉네임</label>
+        <input type="text" id="profile-nickname" placeholder="예: 마덕이">
+      </div>
+      <div class="form-group">
+        <label>🖼️ 프로필 아바타 선택</label>
+        <div class="avatar-grid" id="avatar-grid"></div>
+      </div>
+      <button class="btn-main btn-orange" style="width:100%;" onclick="saveProfile()">✅ 설정 완료하고 시작하기</button>
+    </div>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="screen" id="screen-dashboard">
+  <div class="app-header">
+    <div class="header-top">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <img id="dash-avatar" src="./Profile/Profile_1_hearts.png" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid #FFE0C8;">
+        <div class="header-project" id="dash-nickname">여행자</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="header-mini-btn" onclick="openGuideModal()">📖 이용방법</button>
+        <button class="header-mini-btn" onclick="logout()">🚪</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="dash-actions">
+      <button class="btn-main btn-orange" onclick="playSound('travel');showScreen('screen-create')">✨ 새 프로젝트 만들기</button>
+      <div class="join-box-inline">
+        <div style="font-size:13px;font-weight:700;color:#888;margin-bottom:8px;">🔑 초대 코드로 참여하기</div>
+        <div class="form-row">
+          <input type="text" id="dash-j-code" placeholder="예: TRIP-A1B2" style="text-transform:uppercase;letter-spacing:1px;font-weight:700;flex:2;">
+          <input type="password" id="dash-j-pw" placeholder="비밀번호 (있다면)" style="flex:1;">
+        </div>
+        <button class="btn-main btn-outline" style="width:100%;margin-top:10px;" onclick="dashboardJoin()">참여하기 →</button>
+      </div>
+    </div>
+    <div class="section-title" style="margin-top:24px;">🧳 내 여행 목록</div>
+    <div class="project-list" id="dashboard-project-list"></div>
   </div>
 </div>
 
 <!-- CREATE -->
 <div class="screen" id="screen-create">
   <div style="padding:16px;max-width:420px;width:100%;margin:0 auto;">
-    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="showScreen('screen-home')">← 뒤로</button>
+    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="goToDashboard()">← 뒤로</button>
     <div class="create-box">
       <h2>✨ 새 프로젝트 만들기</h2>
       <div class="form-group"><label>여행 이름</label><input type="text" id="c-name" placeholder="예: 오사카 여행 2025 🍣"></div>
@@ -905,25 +1173,13 @@ function updateStatusBadge(type){
   </div>
 </div>
 
-<!-- JOIN -->
-<div class="screen" id="screen-join">
-  <div style="padding:16px;max-width:380px;width:100%;margin:0 auto;">
-    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="showScreen('screen-home')">← 뒤로</button>
-    <div class="join-box">
-      <h2>🔑 코드로 참여하기</h2>
-      <div class="form-group"><label>프로젝트 코드</label><input type="text" id="j-code" placeholder="예: TRIP-A1B2" style="text-transform:uppercase;letter-spacing:2px;font-size:18px;font-weight:700;"></div>
-      <div class="form-group"><label>비밀번호 (잠금 설정된 경우)</label><input type="password" id="j-pw" placeholder="비밀번호 입력"></div>
-      <button class="btn-main btn-orange" onclick="playSound('coin');joinProject()" style="width:100%;">참여하기 →</button>
-    </div>
-  </div>
-</div>
-
 <!-- PLANNING MAIN -->
 <div class="screen" id="screen-plan-main">
   <div class="app-header">
     <div class="header-top">
       <div class="header-project" id="plan-header-title">✈️ 여행</div>
       <div style="display:flex;gap:8px;align-items:center;">
+        <button class="header-mini-btn" onclick="goToDashboard()">🏠</button>
         <span class="header-code" id="plan-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn active-plan">🗓 플래닝</button>
@@ -1176,6 +1432,7 @@ function updateStatusBadge(type){
     <div class="header-top">
       <div class="header-project travel" id="travel-header-title">🧳 여행</div>
       <div style="display:flex;gap:8px;align-items:center;">
+        <button class="header-mini-btn travel" onclick="goToDashboard()">🏠</button>
         <span class="header-code travel" id="travel-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
@@ -1363,6 +1620,33 @@ function updateStatusBadge(type){
         <input type="password" id="new-pw" placeholder="새 비밀번호 (비우면 잠금 해제)">
         <button class="acc-btn acc-btn-confirm" onclick="changePw()">변경</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: GUIDE -->
+<div class="modal-overlay hidden" id="modal-guide">
+  <div class="modal">
+    <h3>📖 앱 이용방법 <button class="close-btn" onclick="closeModal('modal-guide')">✕</button></h3>
+    <div class="guide-section">
+      <div class="guide-title">1️⃣ 로그인</div>
+      <div class="guide-body">Google 계정으로 간편하게 로그인할 수 있어요. 처음 로그인하면 닉네임과 프로필 아바타를 설정하는 화면이 나타나요. 6가지 기본 아바타 중 마음에 드는 것을 골라주세요.</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">2️⃣ 새 프로젝트 만들기</div>
+      <div class="guide-body">대시보드에서 <b>✨ 새 프로젝트 만들기</b> 버튼을 누르면 여행 이름, 날짜, 비밀번호(선택)를 입력해서 새로운 여행 플랜을 만들 수 있어요. 생성하면 고유한 초대 코드(예: TRIP-A1B2)가 자동으로 발급돼요.</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">3️⃣ 친구 초대하기</div>
+      <div class="guide-body">여행 화면 상단의 <b>📋 코드</b> 배지를 누르면 공유 창이 열려요. 발급된 코드를 친구에게 알려주면, 친구는 대시보드의 <b>🔑 초대 코드로 참여하기</b>에 코드를 입력해서 같은 프로젝트에 함께 참여할 수 있어요. 실시간으로 모든 변경사항이 동기화돼요!</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">4️⃣ 일정 / 정보 수립하기</div>
+      <div class="guide-body">🗓 플래닝 모드에서는 기본 정보(날짜·장소·구성원·이동수단·테마·예산), 숙소 리스트, 일정, 놀거리, 준비물, 옷차림 등을 함께 채워나가요. 여행이 시작되면 🧳 트레블 모드로 전환해서 확정된 정보와 오늘의 일정을 빠르게 확인할 수 있어요.</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">5️⃣ 대시보드로 돌아가기</div>
+      <div class="guide-body">여행 화면 상단의 <b>🏠</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.</div>
     </div>
   </div>
 </div>
