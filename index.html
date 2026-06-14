@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🌏 여행 플래너</title>
+<title>🌏 TTravelingWithMe!</title>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, set, get, update, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
@@ -838,7 +838,7 @@ window.copyCode=function(){
 }
 window.copyInviteMsg=function(){
   const name=document.getElementById('invite-name').value||'친구';
-  const msg=`${name}야! 나랑 같이 여행 계획 짜자~! 🌏\n여행 플래너에서 코드 입력해줘: ${project.code}`;
+  const msg = `${name}야! 나랑 같이 여행 계획 짜자~! 🌏\nTravelingWithMe!에서 코드 입력해줘: ${project.code}\n\n사이트 주소: https://kimmarduckyee.github.io/TravelingWithMe-/\n사용방법: https://happyhobby.creatorlink.net/forum/view/1489773`;
   navigator.clipboard.writeText(msg).catch(()=>{});
   showToast('📤 초대 메시지 복사!');
 }
@@ -1085,7 +1085,7 @@ function updateStatusBadge(type){
 <div class="screen active" id="screen-loading">
   <div style="text-align:center;padding:20px;">
     <div class="home-logo">🌏</div>
-    <div class="home-title">여행 플래너</div>
+    <div class="home-title">TravelingWithMe!</div>
     <div class="home-sub">불러오는 중... 🔄</div>
   </div>
 </div>
@@ -1094,7 +1094,7 @@ function updateStatusBadge(type){
 <div class="screen" id="screen-login">
   <div style="text-align:center;padding:20px;">
     <div class="home-logo">🌏</div>
-    <div class="home-title">여행 플래너</div>
+    <div class="home-title">TravelingWithMe!</div>
     <div class="home-sub">함께 계획하고, 함께 떠나요!</div>
     <div class="home-btns" style="margin:0 auto;">
       <button class="btn-main btn-google" onclick="signInWithGoogle()">
