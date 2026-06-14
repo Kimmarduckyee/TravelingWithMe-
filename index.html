@@ -318,6 +318,44 @@ window.openGuideModal = function() {
   document.getElementById('modal-guide').classList.remove('hidden');
 }
 
+// ══ SETTINGS ══
+let settingsSelectedAvatar = null;
+function renderAvatarGridInto(gridId, selected, handlerName) {
+  const grid = document.getElementById(gridId);
+  if(!grid) return;
+  grid.innerHTML = AVATAR_LIST.map(f =>
+    `<div class="avatar-option${f===selected?' selected':''}" onclick="${handlerName}(this,'${f}')"><img src="${AVATAR_PATH}${f}" alt="${f}" onerror="this.parentElement.style.display='none'"></div>`
+  ).join('');
+}
+window.openSettings = function() {
+  playSound('click');
+  showScreen('screen-settings');
+  settingsSelectedAvatar = (userProfile && userProfile.photo) || AVATAR_LIST[0];
+  setValue('settings-nickname', (userProfile && userProfile.nickname) || '');
+  renderAvatarGridInto('settings-avatar-grid', settingsSelectedAvatar, 'selectSettingsAvatar');
+}
+window.selectSettingsAvatar = function(el, filename) {
+  document.querySelectorAll('#settings-avatar-grid .avatar-option').forEach(a=>a.classList.remove('selected'));
+  el.classList.add('selected');
+  settingsSelectedAvatar = filename;
+  playSound('pop');
+}
+window.saveSettings = async function() {
+  const nickname = document.getElementById('settings-nickname').value.trim();
+  if(!nickname) { showToast('닉네임을 입력해주세요!'); return; }
+  if(!settingsSelectedAvatar) { showToast('프로필 아바타를 선택해주세요!'); return; }
+  try {
+    userProfile.nickname = nickname;
+    userProfile.photo = settingsSelectedAvatar;
+    await update(ref(db, 'users/' + currentUser.uid), { nickname, photo: settingsSelectedAvatar });
+    playSound('save');
+    showToast('✅ 프로필이 수정되었습니다!');
+    showDashboard();
+  } catch(e) {
+    showToast('⚠️ 저장 실패: ' + e.message);
+  }
+}
+
 function dbPath(code) { return ref(db, 'projects/' + code); }
 
 async function saveProject() {
@@ -1044,6 +1082,7 @@ function updateStatusBadge(type){
 
   /* PROFILE SETUP */
   #screen-profile-setup{background:linear-gradient(135deg,#FFF3E8,#FFE5CC);align-items:center;justify-content:center;}
+  #screen-settings{background:linear-gradient(135deg,#FFF3E8,#FFE5CC);align-items:center;justify-content:center;}
   .avatar-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px;}
   .avatar-option{border:3px solid transparent;border-radius:50%;overflow:hidden;cursor:pointer;aspect-ratio:1/1;transition:all .15s;background:#FFF3E8;}
   .avatar-option img{width:100%;height:100%;object-fit:cover;display:block;}
@@ -1133,6 +1172,7 @@ function updateStatusBadge(type){
         <div class="header-project" id="dash-nickname">여행자</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
+        <button class="header-mini-btn" onclick="openSettings()">⚙️ 설정</button>
         <button class="header-mini-btn" onclick="openGuideModal()">📖 이용방법</button>
         <button class="header-mini-btn" onclick="logout()">🚪</button>
       </div>
@@ -1152,6 +1192,25 @@ function updateStatusBadge(type){
     </div>
     <div class="section-title" style="margin-top:24px;">🧳 내 여행 목록</div>
     <div class="project-list" id="dashboard-project-list"></div>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="screen" id="screen-settings">
+  <div style="padding:16px;max-width:460px;width:100%;margin:0 auto;">
+    <button class="btn-main btn-outline" style="width:auto;padding:8px 18px;font-size:13px;margin-bottom:20px;" onclick="goToDashboard()">← 뒤로</button>
+    <div class="create-box">
+      <h2>⚙️ 프로필 설정</h2>
+      <div class="form-group">
+        <label>닉네임</label>
+        <input type="text" id="settings-nickname" placeholder="예: 마덕이">
+      </div>
+      <div class="form-group">
+        <label>🖼️ 프로필 아바타</label>
+        <div class="avatar-grid" id="settings-avatar-grid"></div>
+      </div>
+      <button class="btn-main btn-orange" style="width:100%;" onclick="saveSettings()">💾 저장하기</button>
+    </div>
   </div>
 </div>
 
@@ -1647,6 +1706,10 @@ function updateStatusBadge(type){
     <div class="guide-section">
       <div class="guide-title">5️⃣ 대시보드로 돌아가기</div>
       <div class="guide-body">여행 화면 상단의 <b>🏠</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.</div>
+    </div>
+    <div class="guide-section">
+      <div class="guide-title">6️⃣ 프로필 설정 변경하기</div>
+      <div class="guide-body">대시보드 상단의 <b>⚙️ 설정</b> 버튼을 누르면 닉네임과 프로필 아바타를 언제든지 자유롭게 수정할 수 있어요.</div>
     </div>
   </div>
 </div>
