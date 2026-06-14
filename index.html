@@ -49,6 +49,8 @@ let starsGenerated = false;
 let typingTimeout = null;
 let typingDataListener = null;
 let chatDataListener = null;
+let banListener = null;
+let kickTargetUid = null;
 const AVATAR_LIST = ['Profile_1_hearts.png','profile_2_dumb.png','profile_3_tease.png','profile_4_smirk.png','profile_5_Cat.png','profile_6_Dev.png'];
 const AVATAR_PATH = './Profile/';
 
@@ -81,6 +83,26 @@ function sanitizeProject(p) {
     }
   });
   return p;
+}
+
+// Maps project fields to a human-readable Korean section name, used to tell
+// users exactly what got synced when remote changes arrive.
+const SECTION_LABELS = {
+  name:'프로젝트 이름', place:'기본 정보', start:'기본 정보', end:'기본 정보',
+  transport:'기본 정보', themes:'기본 정보', members:'기본 정보', budget:'기본 정보',
+  password:'비밀번호', hostUid:'방장 정보',
+  accommodations:'숙소 리스트', funList:'놀거리', schedule:'일정', memo:'메모',
+  packList:'준비물', outfit:'옷차림', outfitMemo:'옷차림'
+};
+function getChangedSections(oldP, newP) {
+  if(!oldP || !newP) return [];
+  const changed = new Set();
+  Object.keys(SECTION_LABELS).forEach(key => {
+    if(JSON.stringify(oldP[key]) !== JSON.stringify(newP[key])) {
+      changed.add(SECTION_LABELS[key]);
+    }
+  });
+  return Array.from(changed);
 }
 
 // ══ SOUND EFFECTS ══
@@ -181,6 +203,7 @@ window.logout = async function() {
   detachMembersDataListeners();
   detachTypingListener();
   detachChatListener();
+  detachBanListener();
   setChatVisible(false);
   project = null; projectCode = null;
   try { await signOut(auth); } catch(e) {}
@@ -315,7 +338,18 @@ window.openProjectFromDashboard = async function(code) {
   try {
     const snap = await get(ref(db, 'projects/' + code));
     if(!snap.exists()) { showToast('❌ 프로젝트를 찾을 수 없어요'); return; }
-    project = sanitizeProject(snap.val());
+    const data = snap.val();
+    if(currentUser) {
+      const banSnap = await get(ref(db, `rooms/${code}/bannedUsers/${currentUser.uid}`));
+      if(banSnap.exists() && banSnap.val() === true) {
+        showToast('🚫 이 프로젝트에서 강퇴되어 입장할 수 없어요');
+        if(userProfile && userProfile.projects) delete userProfile.projects[code];
+        remove(ref(db, `users/${currentUser.uid}/projects/${code}`)).catch(()=>{});
+        renderProjectList();
+        return;
+      }
+    }
+    project = sanitizeProject(data);
     projectCode = code;
     attachListener(code);
     enterProject();
@@ -328,6 +362,7 @@ window.goToDashboard = function() {
   detachMembersDataListeners();
   detachTypingListener();
   detachChatListener();
+  detachBanListener();
   setChatVisible(false);
   project = null; projectCode = null;
   playSound('click');
@@ -343,6 +378,13 @@ window.dashboardJoin = async function() {
     if(!snap.exists()) { showToast('❌ 존재하지 않는 코드예요!'); return; }
     const data = snap.val();
     if(data.password && data.password !== pw) { showToast('🔒 비밀번호가 틀렸어요!'); return; }
+    if(currentUser) {
+      const banSnap = await get(ref(db, `rooms/${code}/bannedUsers/${currentUser.uid}`));
+      if(banSnap.exists() && banSnap.val() === true) {
+        showToast('🚫 이 프로젝트에서 강퇴되어 참여할 수 없어요');
+        return;
+      }
+    }
     await registerProjectToUser(code);
     project = sanitizeProject(data); projectCode = code;
     attachListener(code);
@@ -364,7 +406,7 @@ async function registerProjectToUser(code) {
 async function registerMember(code) {
   if(!currentUser || !userProfile || !code) return;
   try {
-    await update(ref(db, `projects/${code}/participants/${currentUser.uid}`), {
+    await update(ref(db, `rooms/${code}/participants/${currentUser.uid}`), {
       nickname: userProfile.nickname || '여행자',
       photo: userProfile.photo || AVATAR_LIST[0]
     });
@@ -377,11 +419,11 @@ function attachPresence(code) {
   connectedListenerRef = connRef;
   onValue(connRef, (snap) => {
     if(snap.val() === true && currentUser && projectCode === code) {
-      const pRef = ref(db, `projects/${code}/presence/${currentUser.uid}`);
+      const pRef = ref(db, `rooms/${code}/presence/${currentUser.uid}`);
       presenceRef = pRef;
       onDisconnect(pRef).remove();
       set(pRef, true);
-      onDisconnect(ref(db, `projects/${code}/typing/${currentUser.uid}`)).remove();
+      onDisconnect(ref(db, `rooms/${code}/typing/${currentUser.uid}`)).remove();
     }
   });
 }
@@ -389,14 +431,14 @@ function detachPresence() {
   if(presenceRef) { remove(presenceRef).catch(()=>{}); presenceRef = null; }
   if(connectedListenerRef) { off(connectedListenerRef); connectedListenerRef = null; }
   if(currentUser && projectCode) {
-    remove(ref(db, `projects/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
+    remove(ref(db, `rooms/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
   }
 }
 function attachMembersListener(code) {
   detachMembersDataListeners();
   if(!code) return;
-  const mRef = ref(db, `projects/${code}/participants`);
-  const pRef = ref(db, `projects/${code}/presence`);
+  const mRef = ref(db, `rooms/${code}/participants`);
+  const pRef = ref(db, `rooms/${code}/presence`);
   membersDataListener = mRef;
   presenceDataListener = pRef;
   onValue(mRef, snap => { membersCache = snap.val() || {}; renderMembersList(); });
@@ -409,17 +451,22 @@ function detachMembersDataListeners() {
 }
 function renderMembersList() {
   const entries = Object.entries(membersCache);
+  const isHost = !!(project && currentUser && project.hostUid === currentUser.uid);
   let html;
   if(!entries.length) {
     html = '<div style="font-size:12px;color:#bbb;">참여자 정보를 불러오는 중...</div>';
   } else {
     html = entries.map(([uid,m]) => {
       const online = !!presenceCache[uid];
-      const isHost = !!(project && project.hostUid === uid);
+      const memberIsHost = !!(project && project.hostUid === uid);
+      const nickname = escapeHtml(m.nickname || '여행자');
+      const hostBadge = memberIsHost ? ' <span class="host-badge">(방장)</span>' : '';
+      const kickBtn = (isHost && !memberIsHost) ? `<button class="member-kick-btn" onclick="openKickConfirm('${uid}','${nickname.replace(/'/g,"\\'")}')" title="강퇴">✕</button>` : '';
       return `<div class="member-chip">
         <img class="member-avatar" src="${getPhotoUrl(m.photo)}" onerror="this.style.display='none'">
-        <span class="member-name">${m.nickname || '여행자'}${isHost?' 👑':''}</span>
+        <span class="member-name">${nickname}${hostBadge}</span>
         <span class="member-dot ${online?'online':'offline'}" title="${online?'온라인':'오프라인'}"></span>
+        ${kickBtn}
       </div>`;
     }).join('');
   }
@@ -433,11 +480,65 @@ function updateHostUI() {
   document.querySelectorAll('.host-only-delete').forEach(el => el.style.display = isHost ? '' : 'none');
 }
 
+// ══ HOST AUTO-CLAIM (for projects created before host system) ══
+async function claimHostIfMissing() {
+  if(!project || !projectCode || !currentUser) return;
+  if(!project.hostUid) {
+    project.hostUid = currentUser.uid;
+    isRemoteUpdate = true;
+    try { await update(ref(db, 'projects/' + projectCode), { hostUid: currentUser.uid }); } catch(e) {}
+    setTimeout(() => isRemoteUpdate = false, 500);
+  }
+}
+
+// ══ MEMBER KICK (HOST ONLY) ══
+window.openKickConfirm = function(uid, nickname) {
+  if(!project || !currentUser || project.hostUid !== currentUser.uid) return;
+  if(uid === currentUser.uid) { showToast('⚠️ 자기 자신은 강퇴할 수 없어요'); return; }
+  kickTargetUid = uid;
+  const nameEl = document.getElementById('kick-target-name');
+  if(nameEl) nameEl.textContent = nickname;
+  playSound('click');
+  document.getElementById('modal-kick').classList.remove('hidden');
+}
+window.confirmKickMember = async function() {
+  if(!kickTargetUid || !project || !projectCode || !currentUser || project.hostUid !== currentUser.uid) return;
+  const uid = kickTargetUid;
+  try {
+    await remove(ref(db, `rooms/${projectCode}/participants/${uid}`));
+    await remove(ref(db, `rooms/${projectCode}/presence/${uid}`));
+    await remove(ref(db, `rooms/${projectCode}/typing/${uid}`));
+    await set(ref(db, `rooms/${projectCode}/bannedUsers/${uid}`), true);
+    closeModal('modal-kick');
+    showToast('👋 멤버를 강퇴했습니다');
+    kickTargetUid = null;
+  } catch(e) { showToast('⚠️ 강퇴 실패: ' + e.message); }
+}
+
+// ══ BAN DETECTION (CURRENT USER GOT KICKED) ══
+function attachBanListener(code) {
+  detachBanListener();
+  if(!currentUser || !code) return;
+  const bRef = ref(db, `rooms/${code}/bannedUsers/${currentUser.uid}`);
+  banListener = bRef;
+  onValue(bRef, snap => {
+    if(snap.val() === true && projectCode === code) {
+      showToast('🚫 방장에 의해 강퇴되었습니다');
+      if(currentUser) remove(ref(db, `users/${currentUser.uid}/projects/${code}`)).catch(()=>{});
+      if(userProfile && userProfile.projects) delete userProfile.projects[code];
+      goToDashboard();
+    }
+  });
+}
+function detachBanListener() {
+  if(banListener) { off(banListener); banListener = null; }
+}
+
 // ══ TYPING INDICATOR ══
-window.notifyTyping = function() {
+window.notifyTyping = function(field) {
   if(!currentUser || !projectCode || !userProfile) return;
-  const tRef = ref(db, `projects/${projectCode}/typing/${currentUser.uid}`);
-  set(tRef, userProfile.nickname || '누군가').catch(()=>{});
+  const tRef = ref(db, `rooms/${projectCode}/typing/${currentUser.uid}`);
+  set(tRef, { nickname: userProfile.nickname || '누군가', field: field || '내용' }).catch(()=>{});
   if(typingTimeout) clearTimeout(typingTimeout);
   typingTimeout = setTimeout(() => {
     remove(tRef).catch(()=>{});
@@ -446,7 +547,7 @@ window.notifyTyping = function() {
 function attachTypingListener(code) {
   detachTypingListener();
   if(!code) return;
-  const tRef = ref(db, `projects/${code}/typing`);
+  const tRef = ref(db, `rooms/${code}/typing`);
   typingDataListener = tRef;
   onValue(tRef, snap => {
     const data = snap.val() || {};
@@ -454,11 +555,12 @@ function attachTypingListener(code) {
     const el = document.getElementById('typing-indicator');
     if(!el) return;
     if(!others.length) { el.classList.remove('show'); el.textContent = ''; return; }
-    const names = others.map(([,n]) => n);
-    let text;
-    if(names.length === 1) text = `${names[0]}님이 입력 중입니다...`;
-    else text = `${names.slice(0,-1).join(', ')}님과 ${names[names.length-1]}님이 입력 중입니다...`;
-    el.textContent = text;
+    const parts = others.map(([,v]) => {
+      const nickname = (v && v.nickname) || '누군가';
+      const field = (v && v.field) || '내용';
+      return `${nickname}님이 [${field}] 입력 중`;
+    });
+    el.textContent = parts.join(', ') + '...';
     el.classList.add('show');
   });
 }
@@ -475,7 +577,7 @@ function escapeHtml(str) {
 function attachChatListener(code) {
   detachChatListener();
   if(!code) return;
-  const cRef = query(ref(db, `projects/${code}/chat`), limitToLast(100));
+  const cRef = query(ref(db, `rooms/${code}/chat`), limitToLast(100));
   chatDataListener = cRef;
   onValue(cRef, snap => {
     renderChatMessages(snap.val() || {});
@@ -496,10 +598,12 @@ function renderChatMessages(data) {
   }
   list.innerHTML = msgs.map(m => {
     const mine = !!(currentUser && m.uid === currentUser.uid);
+    const isHostMsg = !!(project && project.hostUid === m.uid);
+    const hostBadge = isHostMsg ? ' <span class="host-badge">(방장)</span>' : '';
     return `<div class="chat-msg ${mine?'mine':''}">
       <img class="chat-avatar" src="${getPhotoUrl(m.photo)}" onerror="this.style.display='none'">
       <div class="chat-bubble-wrap">
-        <div class="chat-name">${escapeHtml(m.nickname||'여행자')}</div>
+        <div class="chat-name">${escapeHtml(m.nickname||'여행자')}${hostBadge}</div>
         <div class="chat-bubble">${escapeHtml(m.text)}</div>
       </div>
     </div>`;
@@ -513,7 +617,7 @@ window.sendChatMessage = async function() {
   if(!text) return;
   if(!projectCode || !currentUser || !userProfile) return;
   try {
-    const msgRef = push(ref(db, `projects/${projectCode}/chat`));
+    const msgRef = push(ref(db, `rooms/${projectCode}/chat`));
     await set(msgRef, {
       uid: currentUser.uid,
       nickname: userProfile.nickname || '여행자',
@@ -524,7 +628,7 @@ window.sendChatMessage = async function() {
     input.value = '';
     playSound('pop');
     if(typingTimeout) clearTimeout(typingTimeout);
-    remove(ref(db, `projects/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
+    remove(ref(db, `rooms/${projectCode}/typing/${currentUser.uid}`)).catch(()=>{});
   } catch(e) { showToast('⚠️ 전송 실패: ' + e.message); }
 }
 window.toggleChatPanel = function() {
@@ -545,12 +649,26 @@ function setChatVisible(visible) {
 }
 
 // ══ GLOBAL TYPING DETECTION ══
+const TYPING_FIELD_LABELS = {
+  'f-place':'여행 장소','f-start':'시작일','f-end':'종료일','f-member-input':'구성원',
+  'f-theme-input':'여행 테마','f-budget':'예산',
+  'acc-name':'숙소 이름','acc-price':'숙소 가격','acc-link':'예약 링크','acc-note-input':'숙소 특이사항','acc-photo-url':'숙소 사진 URL',
+  'fun-name':'놀거리 이름','fun-link':'놀거리 링크','fun-memo':'놀거리 메모','fun-photo-url':'놀거리 사진 URL',
+  'memo-text':'메모','pack-input':'준비물','outfit-memo':'옷차림 메모',
+  'invite-name':'초대 메시지','new-pw':'비밀번호'
+};
+function getTypingFieldLabel(el) {
+  if(TYPING_FIELD_LABELS[el.id]) return TYPING_FIELD_LABELS[el.id];
+  if(el.id.startsWith('stext-')) return '일정 내용';
+  if(el.id.startsWith('stime-')) return '일정 시간';
+  return '내용';
+}
 document.addEventListener('input', (e) => {
   const t = e.target;
   if(!projectCode || !currentUser) return;
   if(t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA') return;
   if(t.id === 'chat-input') return;
-  window.notifyTyping();
+  window.notifyTyping(getTypingFieldLabel(t));
 });
 
 window.openDeleteConfirm = function() {
@@ -568,9 +686,11 @@ window.confirmDeleteProject = async function() {
     detachMembersDataListeners();
     detachTypingListener();
     detachChatListener();
+    detachBanListener();
     setChatVisible(false);
     if(dbListener) { off(dbListener); dbListener = null; }
     await remove(ref(db, 'projects/' + code));
+    await remove(ref(db, 'rooms/' + code));
     await remove(ref(db, `users/${currentUser.uid}/projects/${code}`));
     if(userProfile.projects) delete userProfile.projects[code];
     closeModal('modal-delete');
@@ -692,9 +812,11 @@ function attachListener(code) {
     if(isRemoteUpdate) return;
     const data = snap.val();
     if(!data) return;
-    project = sanitizeProject(data);
+    const newProject = sanitizeProject(data);
+    const changed = getChangedSections(project, newProject);
+    project = newProject;
     refreshAll();
-    showToast('🔄 실시간 업데이트!');
+    if(changed.length) showToast(`🔄 ${changed.join(', ')} 동기화됨`);
   });
 }
 
@@ -717,7 +839,10 @@ function refreshAll() {
   if(id==='sub-travel-schedule') renderTravelSchedule();
   if(id==='sub-travel-random') renderRandomList();
   if(id==='sub-travel-acc') renderTravelAcc();
-  if(id==='sub-memo' && project) { const m = document.getElementById('memo-text'); if(m) m.value = project.memo||''; }
+  if(id==='sub-memo' && project) {
+    const m = document.getElementById('memo-text');
+    if(m && document.activeElement !== m) m.value = project.memo||'';
+  }
 }
 
 // ══ CREATE ══
@@ -757,8 +882,10 @@ function enterProject() {
   attachMembersListener(projectCode);
   attachTypingListener(projectCode);
   attachChatListener(projectCode);
+  attachBanListener(projectCode);
   setChatVisible(true);
   updateHostUI();
+  claimHostIfMissing().then(updateHostUI);
   showMain('plan');
 }
 
@@ -1089,12 +1216,18 @@ function renderCompare(){
     </tr>`).join('')}</tbody></table></div>`;
 }
 
-// ══ MEMO ══
-window.saveMemo=async function(){
+// ══ MEMO (디바운스 자동저장: 입력 멈춘 후 동기화) ══
+let memoSaveTimeout = null;
+window.handleMemoInput = function() {
   if(!project) return;
-  project.memo=document.getElementById('memo-text').value;
-  await saveProject();
-  setText('status-memo', project.memo?'✅ 작성됨':'비어있음');
+  const el = document.getElementById('memo-text');
+  project.memo = el.value;
+  setText('status-memo', '✏️ 입력 중...');
+  if(memoSaveTimeout) clearTimeout(memoSaveTimeout);
+  memoSaveTimeout = setTimeout(async () => {
+    await saveProject();
+    setText('status-memo', project.memo ? '✅ 저장됨' : '비어있음');
+  }, 800);
 }
 
 // ══ PACKING ══
@@ -1461,6 +1594,9 @@ function updateStatusBadge(type){
   .member-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;}
   .member-dot.online{background:#4CAF50;box-shadow:0 0 0 2px rgba(76,175,80,.2);}
   .member-dot.offline{background:#ccc;}
+  .host-badge{color:#FF8C42;font-weight:800;font-size:11px;}
+  .member-kick-btn{background:none;border:none;color:#ddd;font-size:13px;cursor:pointer;padding:0 2px;margin-left:2px;line-height:1;transition:color .15s;}
+  .member-kick-btn:hover{color:#e74c3c;}
 
   /* DANGER BUTTON */
   .danger-btn{width:100%;padding:14px;border:2px solid #ffb3b3;background:#FFF0F0;color:#e74c3c;border-radius:var(--radius);font-size:14px;font-weight:700;cursor:pointer;margin-top:24px;transition:all .2s;}
@@ -1552,6 +1688,9 @@ function updateStatusBadge(type){
     background:rgba(155,77,255,.18);color:#d3b8ff;
   }
   [data-theme="dark"] .header-mini-btn.logout-btn{background:rgba(255,94,94,.18);color:#ff9a9a;}
+  [data-theme="dark"] .host-badge{color:#c9a8ff;}
+  [data-theme="dark"] .member-kick-btn{color:#6b5a8a;}
+  [data-theme="dark"] .member-kick-btn:hover{color:#ff8f8f;}
   [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input{
     background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);
   }
@@ -1583,6 +1722,7 @@ function updateStatusBadge(type){
   [data-theme="summer"] .info-chip.travel,[data-theme="summer"] .header-code.travel{background:rgba(255,143,193,.22);color:#d6589e;}
   [data-theme="summer"] .header-code{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .tag{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .host-badge{color:#d6589e;}
   [data-theme="summer"] .btn-orange,[data-theme="summer"] .save-btn,[data-theme="summer"] .spin-btn,[data-theme="summer"] .acc-btn-confirm,[data-theme="summer"] .chat-send-btn{
     background:linear-gradient(135deg,#4A90D9,#FF8FC1); color:#fff;
   }
@@ -1960,7 +2100,7 @@ function updateStatusBadge(type){
   </div>
   <div class="main-content">
     <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📝 메모</div></div>
-    <div class="memo-box"><textarea class="memo-textarea" id="memo-text" placeholder="자유롭게 메모하세요 ✍️" oninput="saveMemo()"></textarea></div>
+    <div class="memo-box"><textarea class="memo-textarea" id="memo-text" placeholder="자유롭게 메모하세요 ✍️" oninput="handleMemoInput()"></textarea></div>
   </div>
 </div>
 
@@ -2260,6 +2400,18 @@ function updateStatusBadge(type){
     <div style="display:flex;gap:8px;">
       <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-delete')">취소</button>
       <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmDeleteProject()">🗑️ 영구 삭제</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: KICK CONFIRM -->
+<div class="modal-overlay hidden" id="modal-kick">
+  <div class="modal">
+    <h3>👋 멤버 강퇴 <button class="close-btn" onclick="closeModal('modal-kick')">✕</button></h3>
+    <div style="font-size:14px;color:#666;line-height:1.7;margin-bottom:18px;"><b id="kick-target-name" style="color:#e74c3c;"></b>님을 이 프로젝트에서 강퇴하시겠어요? 강퇴된 멤버는 더 이상 이 프로젝트에 참여할 수 없어요.</div>
+    <div style="display:flex;gap:8px;">
+      <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-kick')">취소</button>
+      <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmKickMember()">👋 강퇴하기</button>
     </div>
   </div>
 </div>
