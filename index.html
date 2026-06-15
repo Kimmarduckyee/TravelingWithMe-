@@ -891,6 +891,42 @@ function setupImgurFileInput(inputId, statusElId, onDone) {
   };
 }
 
+// ══ KAKAO MAPS (장소 검색) ══
+// 발급: https://developers.kakao.com → 애플리케이션 추가 → JavaScript 키 복사
+// → "플랫폼" 설정에서 사이트 도메인(예: https://username.github.io)을 등록해야 동작해요.
+const KAKAO_MAP_API_KEY = 'YOUR_KAKAO_MAP_API_KEY';
+let kakaoMapsLoaded = false;
+let kakaoMapsLoading = null;
+function loadKakaoMaps() {
+  if(kakaoMapsLoaded) return Promise.resolve();
+  if(KAKAO_MAP_API_KEY === 'bbe3b259a4f496188cab4ea1d7d43d1b') {
+    return Promise.reject(new Error('Kakao Maps API 키가 설정되지 않았어요 (코드 상단 KAKAO_MAP_API_KEY 확인)'));
+  }
+  if(kakaoMapsLoading) return kakaoMapsLoading;
+  kakaoMapsLoading = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_MAP_API_KEY}&libraries=services&autoload=false`;
+    script.onload = () => {
+      window.kakao.maps.load(() => { kakaoMapsLoaded = true; resolve(); });
+    };
+    script.onerror = () => { kakaoMapsLoading = null; reject(new Error('Kakao Maps SDK 로드 실패 (도메인 등록을 확인해주세요)')); };
+    document.head.appendChild(script);
+  });
+  return kakaoMapsLoading;
+}
+function kakaoMapLink(loc) {
+  if(!loc) return '#';
+  return `https://map.kakao.com/link/map/${encodeURIComponent(loc.name)},${loc.lat},${loc.lng}`;
+}
+
+// ══ 교통수단 ══
+const TRANSPORT_MODES = {
+  bus:    { icon:'🚌', label:'버스',   detailLabel:'버스 번호',        placeholder:'예: 472번' },
+  subway: { icon:'🚇', label:'지하철', detailLabel:'노선 및 하차역',   placeholder:'예: 2호선 강남역' },
+  car:    { icon:'🚗', label:'자동차', detailLabel:'경로 / 메모',      placeholder:'예: 경유지, 주차 위치 등' },
+  walk:   { icon:'🚶', label:'도보',   detailLabel:'소요 시간 / 거리', placeholder:'예: 도보 10분 (700m)' }
+};
+
 // ══ SETTINGS ══
 let settingsSelectedAvatar = null;
 function renderAvatarGridInto(gridId, selected, handlerName) {
@@ -1033,6 +1069,7 @@ function refreshAll() {
   if(id==='sub-travel-acc') renderTravelAcc();
   if(id==='sub-travel-fun') renderTravelFun();
   if(id==='sub-travel-review') renderReviewFeed();
+  if(id==='sub-transport-summary') renderTransportSummary('transport-summary-content');
   if(id==='sub-memo' && project) {
     const m = document.getElementById('memo-text');
     if(m && document.activeElement !== m) m.value = project.memo||'';
@@ -1166,6 +1203,7 @@ window.showSub = function(id) {
   if(id==='sub-travel-acc') renderTravelAcc();
   if(id==='sub-travel-fun') renderTravelFun();
   if(id==='sub-travel-review') renderReviewFeed();
+  if(id==='sub-transport-summary') renderTransportSummary('transport-summary-content');
 }
 
 // ══ BASIC INFO ══
@@ -1385,35 +1423,98 @@ window.addScheduleDay=async function(){
 }
 function addDays(dateStr,days){ const d=new Date(dateStr); d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); }
 
+// per-day "일정/교통수단" add-tab state (default: 일정)
+let scheduleAddTab = {};
+function renderScheduleItemRow(item, di, ii, showDelete=true){
+  const delBtn = showDelete?`<button style="background:none;border:none;color:#ddd;cursor:pointer;" onclick="deleteSchedItem(${di},${ii})">×</button>`:'';
+  if(item.type==='transport'){
+    const m = TRANSPORT_MODES[item.mode]||TRANSPORT_MODES.car;
+    return `<div class="schedule-item schedule-item-transport">
+      <span class="schedule-time">${escapeHtml(item.time||'')}</span>
+      <span class="schedule-text">${m.icon} ${m.label}${item.detail?' · '+escapeHtml(item.detail):''}</span>
+      ${delBtn}
+    </div>`;
+  }
+  return `<div class="schedule-item">
+    <span class="schedule-time">${escapeHtml(item.time||'')}</span>
+    <span class="schedule-text">${escapeHtml(item.text||'')}${item.location?` <a class="schedule-location-tag" href="${kakaoMapLink(item.location)}" target="_blank" onclick="event.stopPropagation()">📍 ${escapeHtml(item.location.name)}</a>`:''}</span>
+    ${delBtn}
+  </div>`;
+}
 function renderScheduleList(){
   const list=document.getElementById('schedule-list');
   if(!project.schedule||!project.schedule.length){ list.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">날짜를 추가해보세요! ➕</div>'; return; }
-  list.innerHTML=project.schedule.map((day,di)=>`
+  list.innerHTML=project.schedule.map((day,di)=>{
+    const tab = scheduleAddTab[di]||'event';
+    return `
     <div class="schedule-day">
       <div class="schedule-day-header">
-        <div class="schedule-day-title">📅 ${day.label}</div>
+        <div class="schedule-day-title">📅 ${escapeHtml(day.label)}</div>
         <button class="acc-btn acc-btn-del" onclick="deleteDay(${di})">삭제</button>
       </div>
-      ${(day.items||[]).map((item,ii)=>`
-        <div class="schedule-item">
-          <span class="schedule-time">${item.time}</span>
-          <span class="schedule-text">${item.text}</span>
-          <button style="background:none;border:none;color:#ddd;cursor:pointer;" onclick="deleteSchedItem(${di},${ii})">×</button>
-        </div>`).join('')}
-      <div class="add-item-row">
+      ${(day.items||[]).map((item,ii)=>renderScheduleItemRow(item,di,ii)).join('')}
+      <div class="schedule-add-tabs" id="schedule-tabs-${di}">
+        <button class="schedule-tab-btn ${tab==='event'?'active':''}" data-tab="event" onclick="setScheduleAddTab(${di},'event')">📅 일정</button>
+        <button class="schedule-tab-btn ${tab==='transport'?'active':''}" data-tab="transport" onclick="setScheduleAddTab(${di},'transport')">🚌 교통수단</button>
+      </div>
+      <div class="add-item-row" id="event-add-row-${di}" style="${tab==='event'?'':'display:none;'}">
         <input type="time" id="stime-${di}" style="width:90px;">
-        <input type="text" id="stext-${di}" placeholder="일정 입력">
+        <input type="text" id="stext-${di}" placeholder="일정 입력 (장소명 직접 입력)">
+        <button class="location-search-btn" title="장소 검색" onclick="openLocationSearch(${di})">📍</button>
         <button class="small-btn" onclick="addSchedItem(${di})">추가</button>
       </div>
-    </div>`).join('');
+      <div class="add-item-row transport-add-row" id="transport-add-row-${di}" style="${tab==='transport'?'':'display:none;'}">
+        <input type="time" id="ttime-${di}" style="width:90px;">
+        <select id="tmode-${di}" onchange="updateTransportDetailField(${di})">
+          <option value="bus">🚌 버스</option>
+          <option value="subway">🚇 지하철</option>
+          <option value="car">🚗 자동차</option>
+          <option value="walk">🚶 도보</option>
+        </select>
+        <input type="text" id="tdetail-${di}" placeholder="${TRANSPORT_MODES.bus.placeholder}">
+        <button class="small-btn" onclick="addTransportItem(${di})">추가</button>
+      </div>
+    </div>`;
+  }).join('');
   setText('status-schedule', project.schedule.length+'일');
+}
+window.setScheduleAddTab = function(di, tab){
+  scheduleAddTab[di] = tab;
+  const tabsEl = document.getElementById(`schedule-tabs-${di}`);
+  if(tabsEl) tabsEl.querySelectorAll('.schedule-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab===tab));
+  const eventRow = document.getElementById(`event-add-row-${di}`);
+  const transportRow = document.getElementById(`transport-add-row-${di}`);
+  if(eventRow) eventRow.style.display = tab==='event' ? '' : 'none';
+  if(transportRow) transportRow.style.display = tab==='transport' ? '' : 'none';
+  playSound('click');
+}
+window.updateTransportDetailField = function(di){
+  const mode = document.getElementById(`tmode-${di}`).value;
+  const input = document.getElementById(`tdetail-${di}`);
+  const m = TRANSPORT_MODES[mode]||TRANSPORT_MODES.car;
+  if(input) input.placeholder = m.placeholder;
 }
 window.addSchedItem=async function(di){
   if(isProjectReadOnly()) return;
   const time=document.getElementById(`stime-${di}`).value||'??:??';
   const text=document.getElementById(`stext-${di}`).value.trim(); if(!text) return;
   if(!Array.isArray(project.schedule[di].items)) project.schedule[di].items=[];
-  project.schedule[di].items.push({time,text});
+  let location = null;
+  if(pendingScheduleLocation && pendingScheduleLocation.di===di){
+    location = pendingScheduleLocation.location;
+    pendingScheduleLocation = null;
+  }
+  project.schedule[di].items.push({type:'event', time, text, location});
+  await saveProject(); renderScheduleList();
+}
+window.addTransportItem=async function(di){
+  if(isProjectReadOnly()) return;
+  const time=document.getElementById(`ttime-${di}`).value||'??:??';
+  const mode=document.getElementById(`tmode-${di}`).value;
+  const detail=document.getElementById(`tdetail-${di}`).value.trim();
+  if(!Array.isArray(project.schedule[di].items)) project.schedule[di].items=[];
+  project.schedule[di].items.push({type:'transport', time, mode, detail});
+  document.getElementById(`tdetail-${di}`).value='';
   await saveProject(); renderScheduleList();
 }
 window.deleteSchedItem=async function(di,ii){ if(isProjectReadOnly()) return; project.schedule[di].items.splice(ii,1); await saveProject(); renderScheduleList(); }
@@ -1442,7 +1543,100 @@ function renderCompare(){
     </tr>`).join('')}</tbody></table></div>`;
 }
 
-// ══ 이상형 월드컵 ══
+// ══ 장소 검색 (Kakao Maps) ══
+let pendingScheduleLocation = null; // {di, location:{name,address,lat,lng}}
+let locationSearchTargetDi = null;
+window.openLocationSearch = function(di){
+  locationSearchTargetDi = di;
+  setValue('location-search-input','');
+  document.getElementById('location-search-results').innerHTML='';
+  playSound('click');
+  document.getElementById('modal-location-search').classList.remove('hidden');
+}
+window.searchLocation = async function(){
+  const query = document.getElementById('location-search-input').value.trim();
+  const resultsEl = document.getElementById('location-search-results');
+  if(!query){ showToast('검색어를 입력해주세요!'); return; }
+  resultsEl.innerHTML = '<div class="empty-hint">🔍 검색 중...</div>';
+  try {
+    await loadKakaoMaps();
+    const places = new kakao.maps.services.Places();
+    places.keywordSearch(query, (data, status) => {
+      if(status === kakao.maps.services.Status.OK){
+        renderLocationResults(data);
+      } else if(status === kakao.maps.services.Status.ZERO_RESULT){
+        resultsEl.innerHTML = '<div class="empty-hint">검색 결과가 없어요 🔍<br>다른 키워드로 검색해보세요</div>';
+      } else {
+        resultsEl.innerHTML = '<div class="empty-hint">검색 중 오류가 발생했어요 😢</div>';
+      }
+    });
+  } catch(e) {
+    resultsEl.innerHTML = `<div class="empty-hint">⚠️ ${escapeHtml(e.message)}<br><small>지도 검색을 쓰려면 코드 상단의 KAKAO_MAP_API_KEY를 설정하고,<br>Kakao Developers에서 사이트 도메인을 등록해주세요.</small><br><br>💡 장소명을 직접 입력해도 일정 추가는 가능해요!</div>`;
+  }
+}
+function renderLocationResults(data){
+  const resultsEl = document.getElementById('location-search-results');
+  window._locationSearchResults = data;
+  resultsEl.innerHTML = data.map((p,i)=>`
+    <div class="location-result" onclick="selectLocationResult(${i})">
+      <div class="location-result-name">📍 ${escapeHtml(p.place_name)}</div>
+      <div class="location-result-addr">${escapeHtml(p.road_address_name||p.address_name||'')}</div>
+      ${p.category_name?`<div class="location-result-cat">${escapeHtml(p.category_name)}</div>`:''}
+    </div>`).join('');
+}
+window.selectLocationResult = function(i){
+  const p = (window._locationSearchResults||[])[i];
+  if(!p || locationSearchTargetDi==null) return;
+  const location = { name:p.place_name, address:p.road_address_name||p.address_name||'', lat:parseFloat(p.y), lng:parseFloat(p.x) };
+  pendingScheduleLocation = { di: locationSearchTargetDi, location };
+  const textInput = document.getElementById(`stext-${locationSearchTargetDi}`);
+  if(textInput && !textInput.value.trim()) textInput.value = p.place_name;
+  closeModal('modal-location-search');
+  showToast(`📍 위치 선택됨: ${p.place_name}`);
+}
+
+// ══ 교통/동선 요약 ══
+function getTransportSummary(){
+  const out = [];
+  (project.schedule||[]).forEach(day => {
+    const items = day.items||[];
+    items.forEach((item,ii) => {
+      if(item.type!=='transport') return;
+      let from=null, to=null;
+      for(let j=ii-1;j>=0;j--){ if(items[j].type!=='transport'){ from=items[j].text; break; } }
+      for(let j=ii+1;j<items.length;j++){ if(items[j].type!=='transport'){ to=items[j].text; break; } }
+      out.push({dayLabel:day.label, time:item.time, mode:item.mode, detail:item.detail, from, to});
+    });
+  });
+  return out;
+}
+function renderTransportSummary(elId){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  const list = getTransportSummary();
+  if(!list.length){
+    el.innerHTML = '<div class="empty-hint">등록된 교통수단 정보가 없어요 🚌<br>일정에서 교통수단을 추가해보세요!</div>';
+    return;
+  }
+  const byDay = {};
+  list.forEach(t => { (byDay[t.dayLabel] = byDay[t.dayLabel]||[]).push(t); });
+  el.innerHTML = Object.entries(byDay).map(([dayLabel, items]) => `
+    <div class="transport-day-group">
+      <div class="transport-day-title">📅 ${escapeHtml(dayLabel)}</div>
+      ${items.map(t => {
+        const m = TRANSPORT_MODES[t.mode]||TRANSPORT_MODES.car;
+        return `<div class="transport-summary-item">
+          <div class="transport-summary-icon">${m.icon}</div>
+          <div class="transport-summary-body">
+            <div class="transport-summary-route">${t.from?escapeHtml(t.from):'?'} → ${t.to?escapeHtml(t.to):'?'}</div>
+            <div class="transport-summary-detail">${m.label}${t.detail?' · '+escapeHtml(t.detail):''} · ${escapeHtml(t.time||'')}</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`).join('');
+}
+
+
 function shuffleArr(arr){
   const a=[...arr];
   for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
@@ -1682,11 +1876,10 @@ function renderTravelSummary(){
 function renderTravelSchedule(){
   const el=document.getElementById('travel-schedule-content');
   if(!project.schedule||!project.schedule.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 일정이 없어요 📅</div>'; return; }
-  el.innerHTML=project.schedule.map(day=>`
+  el.innerHTML=project.schedule.map((day,di)=>`
     <div class="schedule-day">
-      <div class="schedule-day-title" style="margin-bottom:10px;">📅 ${day.label}</div>
-      ${(day.items||[]).length?(day.items||[]).map(item=>`
-        <div class="schedule-item"><span class="schedule-time">${item.time}</span><span class="schedule-text">${item.text}</span></div>`).join('')
+      <div class="schedule-day-title" style="margin-bottom:10px;">📅 ${escapeHtml(day.label)}</div>
+      ${(day.items||[]).length?(day.items||[]).map((item,ii)=>renderScheduleItemRow(item,di,ii,false)).join('')
       :'<div style="color:#bbb;font-size:13px;">일정 없음</div>'}
     </div>`).join('');
 }
@@ -2210,10 +2403,40 @@ function updateAllStatusBadges(){
   .schedule-item{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed #FFE8D0;align-items:flex-start;}
   .schedule-time{font-size:12px;color:#FF8C42;font-weight:600;min-width:45px;}
   .schedule-text{font-size:13px;color:#555;flex:1;}
-  .add-item-row{display:flex;gap:8px;margin-top:10px;}
-  .add-item-row input{flex:1;padding:8px 12px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;}
+  .add-item-row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+  .add-item-row input{flex:1;padding:8px 12px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;min-width:0;}
   .add-item-row input:focus{border-color:#FF8C42;}
+  .add-item-row select{padding:8px 10px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;background:#fff;color:#555;font-family:inherit;}
+  .add-item-row select:focus{border-color:#FF8C42;}
   .small-btn{padding:8px 14px;background:#FF8C42;color:#fff;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+
+  /* 일정 - 교통수단 항목 / 탭 / 장소 */
+  .schedule-item-transport{background:#F0F7FF;border-radius:var(--radius-sm);border-bottom:none;margin-bottom:6px;padding:8px 10px;}
+  .schedule-item-transport .schedule-text{color:#4A90D9;font-weight:700;}
+  .schedule-location-tag{display:inline-block;background:#FFF3E8;color:#FF8C42;border-radius:50px;padding:2px 10px;font-size:11px;font-weight:700;text-decoration:none;margin-left:4px;white-space:nowrap;}
+  .schedule-add-tabs{display:flex;gap:6px;margin-top:14px;}
+  .schedule-tab-btn{flex:1;padding:8px;border:2px solid #FFE0C8;background:#fff;border-radius:50px;font-size:12px;font-weight:700;color:#aaa;cursor:pointer;transition:all .15s;}
+  .schedule-tab-btn.active{background:#FF8C42;color:#fff;border-color:#FF8C42;}
+  .location-search-btn{padding:8px 10px;background:#FFF3E8;color:#FF8C42;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:14px;cursor:pointer;}
+  .location-search-btn:hover{background:#FFE8D0;}
+
+  /* 장소 검색 결과 */
+  .location-result{padding:10px 12px;border-bottom:1px solid #FFF3E8;cursor:pointer;border-radius:var(--radius-sm);transition:background .15s;}
+  .location-result:hover{background:#FFF8F2;}
+  .location-result:last-child{border-bottom:none;}
+  .location-result-name{font-size:13px;font-weight:700;color:#333;}
+  .location-result-addr{font-size:12px;color:#999;margin-top:2px;}
+  .location-result-cat{font-size:11px;color:#bbb;margin-top:2px;}
+
+  /* 교통/동선 요약 */
+  .transport-day-group{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:12px;}
+  .transport-day-title{font-size:15px;font-weight:700;color:#FF8C42;margin-bottom:10px;}
+  .transport-summary-item{display:flex;gap:12px;align-items:flex-start;padding:8px 0;border-bottom:1px dashed #FFE8D0;}
+  .transport-summary-item:last-child{border-bottom:none;}
+  .transport-summary-icon{font-size:20px;flex-shrink:0;}
+  .transport-summary-body{flex:1;}
+  .transport-summary-route{font-size:13px;font-weight:700;color:#333;}
+  .transport-summary-detail{font-size:12px;color:#999;margin-top:2px;}
 
   /* MEMO */
   .memo-box{background:#fff;border-radius:var(--radius);padding:20px;box-shadow:var(--shadow-card);}
@@ -2378,6 +2601,12 @@ function updateAllStatusBadges(){
   .header-mini-btn.travel{background:#E8F3FF;color:#4A90D9;}
   .header-mini-btn.travel:hover{background:#D0E5FF;}
   #screen-dashboard .header-mini-btn{width:auto;border-radius:50px;padding:6px 12px;font-size:12px;font-weight:700;}
+
+  /* HOME BUTTON (가시성 강화: 텍스트 포함) */
+  .home-btn{background:#FFF3E8;border:none;border-radius:50px;padding:7px 14px;font-size:12px;font-weight:800;color:#FF8C42;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap;transition:all .2s;}
+  .home-btn:hover{background:#FFE0C8;}
+  .home-btn.travel{background:#E8F3FF;color:#4A90D9;}
+  .home-btn.travel:hover{background:#D0E5FF;}
 
   /* DASHBOARD */
   #screen-dashboard .app-header{background:#fff;}
@@ -2556,16 +2785,27 @@ function updateAllStatusBadges(){
   [data-theme="dark"] .menu-card .card-label,[data-theme="dark"] .card-status,[data-theme="dark"] .acc-card-price,[data-theme="dark"] .project-card-meta,[data-theme="dark"] .home-sub,[data-theme="dark"] .form-group label,[data-theme="dark"] .guide-body,[data-theme="dark"] .schedule-time,[data-theme="dark"] .acc-note-tag,[data-theme="dark"] .confirmed-sub,[data-theme="dark"] .code-hint,[data-theme="dark"] .member-name,[data-theme="dark"] .chat-name,[data-theme="dark"] .chat-time{
     color:#b8a8d8;
   }
-  [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .acc-note-tag{
+  [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .home-btn,[data-theme="dark"] .home-btn.travel,[data-theme="dark"] .acc-note-tag{
     background:rgba(155,77,255,.18);color:#d3b8ff;
   }
   [data-theme="dark"] .header-mini-btn.logout-btn{background:rgba(255,94,94,.18);color:#ff9a9a;}
   [data-theme="dark"] .host-badge{color:#c9a8ff;}
   [data-theme="dark"] .member-kick-btn{color:#6b5a8a;}
   [data-theme="dark"] .member-kick-btn:hover{color:#ff8f8f;}
-  [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input{
+  [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .add-item-row select,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input{
     background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);
   }
+  [data-theme="dark"] .schedule-item-transport{background:rgba(155,77,255,.12);}
+  [data-theme="dark"] .schedule-item-transport .schedule-text{color:#c9a8ff;}
+  [data-theme="dark"] .schedule-location-tag{background:rgba(255,255,255,.08);color:#ffb385;}
+  [data-theme="dark"] .schedule-tab-btn,[data-theme="dark"] .location-search-btn{background:rgba(255,255,255,.06);border-color:rgba(155,77,255,.35);color:#b8a8d8;}
+  [data-theme="dark"] .schedule-tab-btn.active{background:#7b2ff7;color:#fff;border-color:#7b2ff7;}
+  [data-theme="dark"] .location-result{border-bottom-color:rgba(155,77,255,.15);}
+  [data-theme="dark"] .location-result:hover{background:rgba(255,255,255,.04);}
+  [data-theme="dark"] .location-result-name{color:#eee;}
+  [data-theme="dark"] .transport-day-group{background:rgba(35,25,60,.78);box-shadow:0 4px 20px rgba(0,0,0,.4);}
+  [data-theme="dark"] .transport-summary-route{color:#e6d6ff;}
+  [data-theme="dark"] .transport-summary-item{border-bottom-color:rgba(155,77,255,.15);}
   [data-theme="dark"] .form-group input::placeholder,[data-theme="dark"] .memo-textarea::placeholder,[data-theme="dark"] .chat-input-row input::placeholder{color:#8d7caa;}
   [data-theme="dark"] .btn-orange,[data-theme="dark"] .save-btn,[data-theme="dark"] .spin-btn,[data-theme="dark"] .small-btn,[data-theme="dark"] .acc-btn-confirm,[data-theme="dark"] .chat-send-btn{
     background:linear-gradient(135deg,#7b2ff7,#a855f7); color:#fff;
@@ -2618,6 +2858,8 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .info-chip{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .info-chip.travel,[data-theme="summer"] .header-code.travel{background:rgba(255,143,193,.22);color:#d6589e;}
   [data-theme="summer"] .header-code{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .home-btn{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .home-btn.travel{background:rgba(255,143,193,.22);color:#d6589e;}
   [data-theme="summer"] .tag{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .host-badge{color:#d6589e;}
   [data-theme="summer"] .btn-orange,[data-theme="summer"] .save-btn,[data-theme="summer"] .spin-btn,[data-theme="summer"] .acc-btn-confirm,[data-theme="summer"] .chat-send-btn{
@@ -2639,6 +2881,10 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .review-banner-btn{background:linear-gradient(135deg,#FF8FC1,#4A90D9);}
   [data-theme="summer"] .review-filter-btn.active,[data-theme="summer"] .pick-btn.selected{background:#4A90D9;border-color:#4A90D9;}
   [data-theme="summer"] .overall-review-section{background:rgba(255,255,255,.8);}
+  [data-theme="summer"] .schedule-item-transport{background:rgba(74,144,217,.1);}
+  [data-theme="summer"] .schedule-item-transport .schedule-text{color:#2E7FD9;}
+  [data-theme="summer"] .schedule-tab-btn.active{background:#4A90D9;border-color:#4A90D9;}
+  [data-theme="summer"] .transport-day-group{background:rgba(255,255,255,.8);}
 </style>
 </head>
 <body>
@@ -2829,8 +3075,8 @@ function updateAllStatusBadges(){
   <div class="app-header">
     <div class="header-top">
       <div class="header-project" id="plan-header-title">✈️ 여행</div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button class="header-mini-btn" onclick="goToDashboard()">🏠</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button class="home-btn" onclick="goToDashboard()">🏠 홈 화면으로</button>
         <span class="header-code" id="plan-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn active-plan">🗓 플래닝</button>
@@ -2867,6 +3113,7 @@ function updateAllStatusBadges(){
       <div class="menu-card" onclick="playSound('pop');showSub('sub-acc')"><div class="card-icon">🏨</div><div class="card-label">숙소 리스트</div><div class="card-status" id="status-acc">0개</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-compare')"><div class="card-icon">🆚</div><div class="card-label">숙소 비교</div><div class="card-status">비교하기</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div><div class="card-status" id="status-fun">0개</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-transport-summary')"><div class="card-icon">🚌</div><div class="card-label">교통/동선</div><div class="card-status">요약 보기</div></div>
     </div>
     <button class="danger-btn host-only-delete" style="display:none;" onclick="openDeleteConfirm()">🗑️ 프로젝트 삭제하기 (방장 전용)</button>
   </div>
@@ -3062,6 +3309,23 @@ function updateAllStatusBadges(){
   </div>
 </div>
 
+<!-- SUB: TRANSPORT SUMMARY (교통/동선 요약) -->
+<div class="screen" id="sub-transport-summary">
+  <div class="app-header">
+    <div class="header-top">
+      <div class="header-project">✈️ 여행</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active-plan">🗓 플래닝</button>
+        <button class="mode-btn" onclick="switchMode('travel')">🧳 트레블</button>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🚌 교통/동선 요약</div></div>
+    <div id="transport-summary-content"></div>
+  </div>
+</div>
+
 <!-- SUB: OUTFIT -->
 <div class="screen" id="sub-outfit">
   <div class="app-header">
@@ -3096,8 +3360,8 @@ function updateAllStatusBadges(){
   <div class="app-header travel">
     <div class="header-top">
       <div class="header-project travel" id="travel-header-title">🧳 여행</div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button class="header-mini-btn travel" onclick="goToDashboard()">🏠</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button class="home-btn travel" onclick="goToDashboard()">🏠 홈 화면으로</button>
         <span class="header-code travel" id="travel-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
@@ -3131,6 +3395,7 @@ function updateAllStatusBadges(){
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
       <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-transport-summary')"><div class="card-icon">🚌</div><div class="card-label">교통/동선</div></div>
     </div>
     <button class="review-banner-btn" onclick="playSound('pop');showSub('sub-travel-review')">📸 여행 리뷰 보러가기</button>
     <button class="end-trip-btn host-only-end" style="display:none;" onclick="openEndTripConfirm()">🏁 여행 끝내기 (방장 전용)</button>
@@ -3258,10 +3523,6 @@ function updateAllStatusBadges(){
   <div class="app-header travel">
     <div class="header-top">
       <div class="header-project travel">📸 여행 리뷰</div>
-      <div class="mode-toggle">
-        <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
-        <button class="mode-btn active-travel">🧳 트레블</button>
-      </div>
     </div>
     <div class="info-bar-mini">
       <span class="info-chip-mini" id="treview-mini">📅</span>
@@ -3384,7 +3645,7 @@ function updateAllStatusBadges(){
     </div>
     <div class="guide-section">
       <div class="guide-title">5️⃣ 대시보드로 돌아가기</div>
-      <div class="guide-body">여행 화면 상단의 <b>🏠</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.</div>
+      <div class="guide-body">여행 화면 상단의 <b>🏠 홈 화면으로</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.</div>
     </div>
     <div class="guide-section">
       <div class="guide-title">6️⃣ 프로필 설정 변경하기</div>
@@ -3439,6 +3700,18 @@ function updateAllStatusBadges(){
 <div class="modal-overlay hidden image-view-overlay" id="modal-image-view" onclick="closeImageView()">
   <button class="image-view-close" onclick="closeImageView()">✕</button>
   <img id="image-view-img" class="image-view-img" src="" onclick="event.stopPropagation()">
+</div>
+
+<!-- MODAL: LOCATION SEARCH (장소 검색) -->
+<div class="modal-overlay hidden" id="modal-location-search">
+  <div class="modal">
+    <h3>📍 장소 검색 <button class="close-btn" onclick="closeModal('modal-location-search')">✕</button></h3>
+    <div class="invite-row">
+      <input type="text" id="location-search-input" placeholder="장소명, 주소 등을 입력하세요" onkeydown="if(event.key==='Enter')searchLocation()">
+      <button class="acc-btn acc-btn-confirm" onclick="searchLocation()">검색</button>
+    </div>
+    <div id="location-search-results" style="margin-top:12px;max-height:320px;overflow-y:auto;"></div>
+  </div>
 </div>
 
 <!-- MODAL: REVIEW -->
