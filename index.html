@@ -39,6 +39,7 @@ let dragAccIdx = null;
 let currentUser = null;
 let userProfile = null;
 let selectedAvatar = null;
+let selectedProfileTheme = 'default';
 let connectedListenerRef = null;
 let presenceRef = null;
 let membersDataListener = null;
@@ -67,21 +68,46 @@ function showToast(msg) {
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2800);
 }
-// Repairs legacy/corrupted data where 'members' or 'themes' (string arrays
-// for 기본정보) accidentally got overwritten as an object.
+// Repairs legacy/corrupted data and Firebase's "empty array becomes undefined
+// on round-trip" quirk, which was silently breaking saves for schedule items,
+// accommodation notes/photos, fun photos, etc.
+function toArr(v) {
+  if(Array.isArray(v)) return v;
+  if(v == null) return [];
+  if(typeof v === 'object') return Object.values(v);
+  return [];
+}
 function sanitizeProject(p) {
   if(!p) return p;
-  ['members','themes'].forEach(f => {
-    const v = p[f];
-    if(v == null) { p[f] = []; }
-    else if(!Array.isArray(v)) {
-      if(typeof v === 'object') {
-        p[f] = Object.values(v).filter(x => typeof x === 'string');
-      } else {
-        p[f] = [];
-      }
-    }
+  ['members','themes','accommodations','funList','schedule','packList'].forEach(f => {
+    p[f] = toArr(p[f]);
   });
+  // members/themes must stay plain string arrays
+  ['members','themes'].forEach(f => {
+    p[f] = p[f].filter(x => typeof x === 'string');
+  });
+  p.accommodations.forEach(a => {
+    a.notes = toArr(a.notes).filter(x => typeof x === 'string');
+    a.photos = toArr(a.photos).filter(x => typeof x === 'string');
+  });
+  p.funList.forEach(f => {
+    f.photos = toArr(f.photos).filter(x => typeof x === 'string');
+  });
+  p.schedule.forEach(d => {
+    d.items = toArr(d.items);
+  });
+  p.reviews = toArr(p.reviews);
+  p.reviews.forEach(r => {
+    r.photos = toArr(r.photos).filter(x => typeof x === 'string');
+    r.comments = toArr(r.comments);
+  });
+  if(p.worldcup) {
+    p.worldcup.items = toArr(p.worldcup.items);
+    p.worldcup.bracket = toArr(p.worldcup.bracket).map(round => toArr(round).map(m => {
+      m.votes = (m.votes && typeof m.votes==='object' && !Array.isArray(m.votes)) ? m.votes : {};
+      return m;
+    }));
+  }
   return p;
 }
 
@@ -92,7 +118,8 @@ const SECTION_LABELS = {
   transport:'기본 정보', themes:'기본 정보', members:'기본 정보', budget:'기본 정보',
   password:'비밀번호', hostUid:'방장 정보',
   accommodations:'숙소 리스트', funList:'놀거리', schedule:'일정', memo:'메모',
-  packList:'준비물', outfit:'옷차림', outfitMemo:'옷차림'
+  packList:'준비물', outfit:'옷차림', outfitMemo:'옷차림',
+  worldcup:'이상형 월드컵', reviews:'리뷰', archived:'여행 상태', archivedAt:'여행 상태'
 };
 function getChangedSections(oldP, newP) {
   if(!oldP || !newP) return [];
@@ -103,6 +130,16 @@ function getChangedSections(oldP, newP) {
     }
   });
   return Array.from(changed);
+}
+
+// Returns true (and shows a toast) if the current project is an archived
+// "지난 여행" — editing is blocked everywhere via this single guard.
+function isProjectReadOnly() {
+  if(project && project.archived) {
+    showToast('🔒 종료된 여행은 수정할 수 없어요');
+    return true;
+  }
+  return false;
 }
 
 // ══ SOUND EFFECTS ══
@@ -205,6 +242,7 @@ window.logout = async function() {
   detachChatListener();
   detachBanListener();
   setChatVisible(false);
+  document.body.classList.remove('readonly-mode');
   project = null; projectCode = null;
   try { await signOut(auth); } catch(e) {}
   showToast('👋 로그아웃 되었습니다');
@@ -245,6 +283,7 @@ async function loadUserProfile() {
 function showProfileSetup() {
   showScreen('screen-profile-setup');
   selectedAvatar = (userProfile && userProfile.photo) || null;
+  selectedProfileTheme = (userProfile && userProfile.theme) || 'default';
   setValue('profile-nickname', (userProfile && userProfile.nickname) || (currentUser && currentUser.displayName) || '');
   renderAvatarGrid();
   document.querySelectorAll('.avatar-option').forEach(a=>a.classList.remove('selected'));
@@ -255,6 +294,14 @@ function showProfileSetup() {
       if(opts[idx]) opts[idx].classList.add('selected');
     }
   }
+  document.querySelectorAll('#profile-theme-grid .theme-option').forEach(o => o.classList.toggle('selected', o.dataset.themeId === selectedProfileTheme));
+  applyTheme(selectedProfileTheme);
+}
+window.selectProfileTheme = function(theme) {
+  selectedProfileTheme = theme;
+  document.querySelectorAll('#profile-theme-grid .theme-option').forEach(o => o.classList.toggle('selected', o.dataset.themeId === theme));
+  applyTheme(theme);
+  playSound('click');
 }
 window.renderAvatarGrid = function() {
   const grid = document.getElementById('avatar-grid');
@@ -274,7 +321,7 @@ window.saveProfile = async function() {
   if(!nickname) { showToast('닉네임을 입력해주세요!'); return; }
   if(!selectedAvatar) { showToast('프로필 아바타를 선택해주세요!'); return; }
   try {
-    userProfile = { nickname, photo: selectedAvatar, projects: (userProfile && userProfile.projects) || {}, soundEnabled: true, theme: 'default' };
+    userProfile = { nickname, photo: selectedAvatar, projects: (userProfile && userProfile.projects) || {}, soundEnabled: true, theme: selectedProfileTheme };
     await set(ref(db, 'users/' + currentUser.uid), userProfile);
     playSound('save');
     showToast('✅ 프로필 설정 완료!');
@@ -298,10 +345,13 @@ function showDashboard() {
 }
 async function renderProjectList() {
   const list = document.getElementById('dashboard-project-list');
+  const pastList = document.getElementById('dashboard-past-list');
+  const pastSection = document.getElementById('dashboard-past-section');
   if(!list) return;
   const codes = Object.keys((userProfile && userProfile.projects) || {});
   if(!codes.length) {
     list.innerHTML = '<div class="empty-hint">아직 참여한 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
+    if(pastSection) pastSection.style.display='none';
     return;
   }
   list.innerHTML = '<div class="empty-hint">불러오는 중... 🔄</div>';
@@ -320,10 +370,13 @@ async function renderProjectList() {
   }
   if(!cards.length) {
     list.innerHTML = '<div class="empty-hint">아직 참여한 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
+    if(pastSection) pastSection.style.display='none';
     return;
   }
   if(removedAny) showToast('🗑️ 삭제된 프로젝트를 목록에서 정리했어요');
-  list.innerHTML = cards.map(({code,p}) => `
+  const active = cards.filter(({p})=>!p.archived);
+  const past = cards.filter(({p})=>p.archived);
+  list.innerHTML = active.length ? active.map(({code,p}) => `
     <div class="project-card" onclick="playSound('pop');openProjectFromDashboard('${code}')">
       <div class="project-card-thumb">✈️</div>
       <div class="project-card-info">
@@ -332,7 +385,23 @@ async function renderProjectList() {
         <div class="project-card-meta">📅 ${p.start ? p.start + (p.end?' ~ '+p.end:'') : '날짜 미정'}</div>
         <div class="project-card-code">${code}</div>
       </div>
-    </div>`).join('');
+    </div>`).join('') : '<div class="empty-hint">진행 중인 여행이 없어요! ✈️<br>새 프로젝트를 만들거나 초대 코드로 참여해보세요</div>';
+  if(pastSection){
+    if(!past.length){ pastSection.style.display='none'; }
+    else {
+      pastSection.style.display='';
+      pastList.innerHTML = past.map(({code,p}) => `
+        <div class="project-card past-project-card" onclick="playSound('pop');openPastProject('${code}')">
+          <div class="project-card-thumb">📦</div>
+          <div class="project-card-info">
+            <div class="project-card-name">${p.name||'이름 없는 여행'}</div>
+            <div class="project-card-meta">📍 ${p.place||'장소 미정'}</div>
+            <div class="project-card-meta">📅 ${p.start ? p.start + (p.end?' ~ '+p.end:'') : '날짜 미정'}</div>
+            <div class="project-card-code">${code}</div>
+          </div>
+        </div>`).join('');
+    }
+  }
 }
 window.openProjectFromDashboard = async function(code) {
   try {
@@ -356,6 +425,22 @@ window.openProjectFromDashboard = async function(code) {
     playSound('travel');
   } catch(e) { showToast('⚠️ 오류: ' + e.message); }
 }
+// Opens an archived ("지난 여행") project in read-only mode — everything is
+// viewable (including adding reviews) but editing is locked.
+window.openPastProject = async function(code) {
+  try {
+    const snap = await get(ref(db, 'projects/' + code));
+    if(!snap.exists()) { showToast('❌ 프로젝트를 찾을 수 없어요'); return; }
+    const data = snap.val();
+    project = sanitizeProject(data);
+    project.archived = true; // ensure read-only even if data is inconsistent
+    projectCode = code;
+    attachListener(code);
+    enterProject();
+    showToast('📦 지난 여행 보기 모드예요 (읽기 전용)');
+    playSound('pop');
+  } catch(e) { showToast('⚠️ 오류: ' + e.message); }
+}
 window.goToDashboard = function() {
   if(dbListener) { off(dbListener); dbListener = null; }
   detachPresence();
@@ -364,6 +449,7 @@ window.goToDashboard = function() {
   detachChatListener();
   detachBanListener();
   setChatVisible(false);
+  document.body.classList.remove('readonly-mode');
   project = null; projectCode = null;
   playSound('click');
   showDashboard();
@@ -478,11 +564,20 @@ function renderMembersList() {
 function updateHostUI() {
   const isHost = !!(project && currentUser && project.hostUid === currentUser.uid);
   document.querySelectorAll('.host-only-delete').forEach(el => el.style.display = isHost ? '' : 'none');
+  document.querySelectorAll('.host-only-end').forEach(el => el.style.display = (isHost && project && !project.archived) ? '' : 'none');
+}
+
+// Toggles read-only UI for archived ("지난 여행") projects: locks editing
+// controls via CSS and shows a banner, while leaving reviews/comments active.
+function updateReadOnlyUI() {
+  const ro = !!(project && project.archived);
+  document.body.classList.toggle('readonly-mode', ro);
+  document.querySelectorAll('.archived-banner').forEach(el => el.style.display = ro ? '' : 'none');
 }
 
 // ══ HOST AUTO-CLAIM (for projects created before host system) ══
 async function claimHostIfMissing() {
-  if(!project || !projectCode || !currentUser) return;
+  if(!project || !projectCode || !currentUser || project.archived) return;
   if(!project.hostUid) {
     project.hostUid = currentUser.uid;
     isRemoteUpdate = true;
@@ -502,7 +597,7 @@ window.openKickConfirm = function(uid, nickname) {
   document.getElementById('modal-kick').classList.remove('hidden');
 }
 window.confirmKickMember = async function() {
-  if(!kickTargetUid || !project || !projectCode || !currentUser || project.hostUid !== currentUser.uid) return;
+  if(!kickTargetUid || !project || !projectCode || !currentUser || project.hostUid !== currentUser.uid || isProjectReadOnly()) return;
   const uid = kickTargetUid;
   try {
     await remove(ref(db, `rooms/${projectCode}/participants/${uid}`));
@@ -600,11 +695,13 @@ function renderChatMessages(data) {
     const mine = !!(currentUser && m.uid === currentUser.uid);
     const isHostMsg = !!(project && project.hostUid === m.uid);
     const hostBadge = isHostMsg ? ' <span class="host-badge">(방장)</span>' : '';
+    const timeStr = m.ts ? new Date(m.ts).toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'}) : '';
     return `<div class="chat-msg ${mine?'mine':''}">
       <img class="chat-avatar" src="${getPhotoUrl(m.photo)}" onerror="this.style.display='none'">
       <div class="chat-bubble-wrap">
         <div class="chat-name">${escapeHtml(m.nickname||'여행자')}${hostBadge}</div>
         <div class="chat-bubble">${escapeHtml(m.text)}</div>
+        <div class="chat-time">${timeStr}</div>
       </div>
     </div>`;
   }).join('');
@@ -694,16 +791,93 @@ window.confirmDeleteProject = async function() {
     await remove(ref(db, `users/${currentUser.uid}/projects/${code}`));
     if(userProfile.projects) delete userProfile.projects[code];
     closeModal('modal-delete');
+    document.body.classList.remove('readonly-mode');
     project = null; projectCode = null;
     showToast('🗑️ 프로젝트가 삭제되었습니다');
     showDashboard();
   } catch(e) { showToast('⚠️ 삭제 실패: ' + e.message); }
 }
 
+// ══ 여행 끝내기 (여행 종료 → 지난 여행으로 이동, 삭제 아님) ══
+window.openEndTripConfirm = function() {
+  if(!project || !currentUser || project.hostUid !== currentUser.uid) return;
+  if(project.archived) { showToast('이미 종료된 여행이에요'); return; }
+  playSound('click');
+  document.getElementById('modal-end-trip').classList.remove('hidden');
+}
+window.confirmEndTrip = async function() {
+  if(!project || !projectCode || !currentUser || project.hostUid !== currentUser.uid) {
+    showToast('⚠️ 방장만 여행을 종료할 수 있어요'); return;
+  }
+  try {
+    project.archived = true;
+    project.archivedAt = Date.now();
+    await saveProject();
+    closeModal('modal-end-trip');
+    playSound('save');
+    showToast('🏁 여행이 종료되었습니다! 지난 여행에 저장되었어요');
+    goToDashboard();
+  } catch(e) { showToast('⚠️ 종료 실패: ' + e.message); }
+}
+
 // ══ GUIDE MODAL ══
 window.openGuideModal = function() {
   playSound('pop');
   document.getElementById('modal-guide').classList.remove('hidden');
+}
+
+// ══ IMAGE LIGHTBOX ══
+window.openImageView = function(src) {
+  if(!src) return;
+  const img = document.getElementById('image-view-img');
+  if(img) img.src = src;
+  document.getElementById('modal-image-view').classList.remove('hidden');
+}
+window.closeImageView = function() {
+  document.getElementById('modal-image-view').classList.add('hidden');
+  const img = document.getElementById('image-view-img');
+  if(img) img.src = '';
+}
+
+// ══ IMGUR UPLOAD ══
+// 발급: https://api.imgur.com/oauth2/addclient (등록 후 "Anonymous usage without user authorization" 선택)
+// 발급받은 Client-ID를 아래에 넣어주세요.
+const IMGUR_CLIENT_ID = '7e7f6e077d853e3';
+async function uploadToImgur(file) {
+  if(!file) throw new Error('파일이 없어요');
+  if(!file.type.startsWith('image/')) throw new Error('이미지 파일만 업로드할 수 있어요');
+  if(IMGUR_CLIENT_ID === 'YOUR_IMGUR_CLIENT_ID') throw new Error('Imgur Client-ID가 설정되지 않았어요 (코드 상단 IMGUR_CLIENT_ID 확인)');
+  const form = new FormData();
+  form.append('image', file);
+  const res = await fetch('https://api.imgur.com/3/image', {
+    method: 'POST',
+    headers: { 'Authorization': 'Client-ID ' + IMGUR_CLIENT_ID },
+    body: form
+  });
+  const data = await res.json();
+  if(!res.ok || !data.success) throw new Error((data.data && data.data.error) || '업로드 실패');
+  return data.data.link;
+}
+// Wires a hidden file input to upload to Imgur, then runs onDone(url) with
+// the resulting image URL. statusElId (optional) shows "업로드 중..." text.
+function setupImgurFileInput(inputId, statusElId, onDone) {
+  const input = document.getElementById(inputId);
+  if(!input) return;
+  input.onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if(!file) return;
+    const statusEl = statusElId ? document.getElementById(statusElId) : null;
+    if(statusEl) statusEl.textContent = '📤 업로드 중...';
+    try {
+      const url = await uploadToImgur(file);
+      if(statusEl) statusEl.textContent = '';
+      onDone(url);
+    } catch(err) {
+      if(statusEl) statusEl.textContent = '';
+      showToast('⚠️ ' + err.message);
+    }
+    input.value = '';
+  };
 }
 
 // ══ SETTINGS ══
@@ -813,10 +987,15 @@ function attachListener(code) {
     const data = snap.val();
     if(!data) return;
     const newProject = sanitizeProject(data);
+    const wasArchived = !!(project && project.archived);
     const changed = getChangedSections(project, newProject);
     project = newProject;
     refreshAll();
     if(changed.length) showToast(`🔄 ${changed.join(', ')} 동기화됨`);
+    if(!wasArchived && newProject.archived) {
+      showToast('🏁 방장이 여행을 종료했어요! 지난 여행으로 이동합니다');
+      setTimeout(() => goToDashboard(), 1200);
+    }
   });
 }
 
@@ -826,6 +1005,8 @@ function refreshAll() {
   refreshTravelInfoBar();
   refreshMiniBar();
   updateHostUI();
+  updateAllStatusBadges();
+  updateReadOnlyUI();
   // re-render current visible sub if needed
   const active = document.querySelector('.screen.active');
   if(!active) return;
@@ -839,6 +1020,8 @@ function refreshAll() {
   if(id==='sub-travel-schedule') renderTravelSchedule();
   if(id==='sub-travel-random') renderRandomList();
   if(id==='sub-travel-acc') renderTravelAcc();
+  if(id==='sub-travel-fun') renderTravelFun();
+  if(id==='sub-travel-review') renderReviewFeed();
   if(id==='sub-memo' && project) {
     const m = document.getElementById('memo-text');
     if(m && document.activeElement !== m) m.value = project.memo||'';
@@ -877,6 +1060,8 @@ function enterProject() {
   updateAllHeaders();
   refreshInfoBar();
   refreshTravelInfoBar();
+  updateAllStatusBadges();
+  updateReadOnlyUI();
   registerMember(projectCode);
   attachPresence(projectCode);
   attachMembersListener(projectCode);
@@ -915,7 +1100,7 @@ function refreshMiniBar() {
     'mini-dates':'📅 '+d,'mini-place':'📍 '+pl,'mini-members':'👥 '+mem,
     'acc-mini-dates':'📅 '+d,'acc-mini-place':'📍 '+pl,
     'sched-mini-dates':'📅 '+d,'fun-mini-dates':'📅 '+d,'fun-mini-place':'📍 '+pl,
-    'cmp-mini-dates':'📅 '+d,'tsumm-mini':'📅 '+d,'tsched-mini':'📅 '+d,'tacc-mini':'📅 '+d
+    'cmp-mini-dates':'📅 '+d,'tsumm-mini':'📅 '+d,'tsched-mini':'📅 '+d,'tacc-mini':'📅 '+d,'tfun-mini':'📅 '+d,'treview-mini':'📅 '+d
   };
   Object.entries(map).forEach(([k,v]) => setText(k,v));
 }
@@ -968,6 +1153,8 @@ window.showSub = function(id) {
   if(id==='sub-travel-schedule') renderTravelSchedule();
   if(id==='sub-travel-random') renderRandomList();
   if(id==='sub-travel-acc') renderTravelAcc();
+  if(id==='sub-travel-fun') renderTravelFun();
+  if(id==='sub-travel-review') renderReviewFeed();
 }
 
 // ══ BASIC INFO ══
@@ -998,7 +1185,7 @@ function loadBasicInfo() {
 function setValue(id,v){ const el=document.getElementById(id); if(el) el.value=v; }
 
 window.saveBasicInfo = async function() {
-  if(!project) return;
+  if(!project || isProjectReadOnly()) return;
   project.place=document.getElementById('f-place').value;
   project.start=document.getElementById('f-start').value;
   project.end=document.getElementById('f-end').value;
@@ -1023,12 +1210,18 @@ window.openAccModal = function(idx) {
   document.getElementById('acc-note-tags').innerHTML='';
   document.getElementById('acc-photo-list').innerHTML='';
   setValue('acc-photo-url','');
+  setText('acc-photo-status','');
   if(idx!=null) {
     const a=project.accommodations[idx];
     setValue('acc-name',a.name); setValue('acc-price',a.price||''); setValue('acc-link',a.link||'');
     accTempNotes=[...a.notes]; accTempPhotos=[...(a.photos||[])];
     renderAccNoteTags(); renderAccPhotoList();
   }
+  setupImgurFileInput('acc-photo-file', 'acc-photo-status', (url) => {
+    if(accTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
+    accTempPhotos.push(url); renderAccPhotoList();
+    showToast('✅ 사진 업로드 완료!');
+  });
   document.getElementById('modal-acc').classList.remove('hidden');
 }
 window.addAccNote=function(e){ if(e.key==='Enter') window.addAccNoteBtn(); }
@@ -1058,6 +1251,7 @@ function renderAccPhotoList(){
 window.removeAccPhoto=function(i){ accTempPhotos.splice(i,1); renderAccPhotoList(); }
 
 window.saveAccommodation = async function() {
+  if(isProjectReadOnly()) return;
   const name=document.getElementById('acc-name').value.trim();
   if(!name){ showToast('숙소 이름을 입력해주세요!'); return; }
   const acc={ name, price:document.getElementById('acc-price').value, link:document.getElementById('acc-link').value, notes:[...accTempNotes], photos:[...accTempPhotos], confirmed:false };
@@ -1082,7 +1276,7 @@ function renderAccList(){
           </div>
           ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
           ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
-          ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+          ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
         </div>
       </div>
       <div class="acc-actions">
@@ -1094,16 +1288,18 @@ function renderAccList(){
 }
 window.dragAcc=function(i){ dragAccIdx=i; }
 window.dropAcc=async function(e,i){
+  if(isProjectReadOnly()) return;
   if(dragAccIdx==null||dragAccIdx===i) return;
   const arr=project.accommodations;
   const tmp=arr.splice(dragAccIdx,1)[0]; arr.splice(i,0,tmp);
   await saveProject(); renderAccList();
 }
 window.toggleConfirmAcc=async function(i){
+  if(isProjectReadOnly()) return;
   project.accommodations[i].confirmed=!project.accommodations[i].confirmed;
   await saveProject(); renderAccList();
 }
-window.deleteAcc=async function(i){ project.accommodations.splice(i,1); await saveProject(); renderAccList(); updateStatusBadge('acc'); }
+window.deleteAcc=async function(i){ if(isProjectReadOnly()) return; project.accommodations.splice(i,1); await saveProject(); renderAccList(); updateStatusBadge('acc'); }
 
 // ══ FUN LIST ══
 window.openFunModal=function(idx){
@@ -1112,11 +1308,17 @@ window.openFunModal=function(idx){
   setValue('fun-name',''); setValue('fun-link',''); setValue('fun-memo','');
   document.getElementById('fun-photo-list').innerHTML='';
   setValue('fun-photo-url','');
+  setText('fun-photo-status','');
   if(idx!=null){
     const f=project.funList[idx];
     setValue('fun-name',f.name); setValue('fun-link',f.link||''); setValue('fun-memo',f.memo||'');
     funTempPhotos=[...(f.photos||[])]; renderFunPhotoList();
   }
+  setupImgurFileInput('fun-photo-file', 'fun-photo-status', (url) => {
+    if(funTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
+    funTempPhotos.push(url); renderFunPhotoList();
+    showToast('✅ 사진 업로드 완료!');
+  });
   document.getElementById('modal-fun').classList.remove('hidden');
 }
 window.addFunPhotoUrl=function(){
@@ -1134,6 +1336,7 @@ function renderFunPhotoList(){
 window.removeFunPhoto=function(i){ funTempPhotos.splice(i,1); renderFunPhotoList(); }
 
 window.saveFun=async function(){
+  if(isProjectReadOnly()) return;
   const name=document.getElementById('fun-name').value.trim();
   if(!name){ showToast('놀거리 이름을 입력해주세요!'); return; }
   const fun={ name, link:document.getElementById('fun-link').value, memo:document.getElementById('fun-memo').value, photos:[...funTempPhotos] };
@@ -1151,17 +1354,18 @@ function renderFunList(){
       <div class="acc-card-header"><div class="acc-card-title">🎡 ${f.name}</div></div>
       ${f.link?`<a class="acc-card-link" href="${f.link}" target="_blank">🔗 참고 사이트</a>`:''}
       ${f.memo?`<div style="font-size:13px;color:#777;margin-top:8px;line-height:1.5;">${f.memo}</div>`:''}
-      ${(f.photos||[]).length?`<div class="acc-photos">${f.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+      ${(f.photos||[]).length?`<div class="acc-photos">${f.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
       <div class="acc-actions">
         <button class="acc-btn acc-btn-edit" onclick="openFunModal(${i})">수정</button>
         <button class="acc-btn acc-btn-del" onclick="deleteFun(${i})">삭제</button>
       </div>
     </div>`).join('');
 }
-window.deleteFun=async function(i){ project.funList.splice(i,1); await saveProject(); renderFunList(); updateStatusBadge('fun'); }
+window.deleteFun=async function(i){ if(isProjectReadOnly()) return; project.funList.splice(i,1); await saveProject(); renderFunList(); updateStatusBadge('fun'); }
 
 // ══ SCHEDULE ══
 window.addScheduleDay=async function(){
+  if(isProjectReadOnly()) return;
   if(!project.schedule) project.schedule=[];
   const dayNum=project.schedule.length+1;
   const dateStr=project.start?addDays(project.start,dayNum-1):`Day ${dayNum}`;
@@ -1194,17 +1398,28 @@ function renderScheduleList(){
   setText('status-schedule', project.schedule.length+'일');
 }
 window.addSchedItem=async function(di){
+  if(isProjectReadOnly()) return;
   const time=document.getElementById(`stime-${di}`).value||'??:??';
   const text=document.getElementById(`stext-${di}`).value.trim(); if(!text) return;
+  if(!Array.isArray(project.schedule[di].items)) project.schedule[di].items=[];
   project.schedule[di].items.push({time,text});
   await saveProject(); renderScheduleList();
 }
-window.deleteSchedItem=async function(di,ii){ project.schedule[di].items.splice(ii,1); await saveProject(); renderScheduleList(); }
-window.deleteDay=async function(di){ project.schedule.splice(di,1); await saveProject(); renderScheduleList(); }
+window.deleteSchedItem=async function(di,ii){ if(isProjectReadOnly()) return; project.schedule[di].items.splice(ii,1); await saveProject(); renderScheduleList(); }
+window.deleteDay=async function(di){ if(isProjectReadOnly()) return; project.schedule.splice(di,1); await saveProject(); renderScheduleList(); }
 
 // ══ COMPARE ══
+let compareTab = 'table';
+window.switchCompareTab = function(tab) {
+  compareTab = tab;
+  playSound('click');
+  document.querySelectorAll('.compare-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab===tab));
+  renderCompare();
+}
 function renderCompare(){
   const el=document.getElementById('compare-content');
+  document.querySelectorAll('.compare-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab===compareTab));
+  if(compareTab==='worldcup') { renderWorldcup(el); return; }
   if(!project.accommodations||!project.accommodations.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 숙소가 없어요 🏨</div>'; return; }
   el.innerHTML=`<div style="overflow-x:auto;"><table class="compare-table">
     <thead><tr><th>숙소명</th><th>가격</th><th>특이사항</th><th>링크</th></tr></thead>
@@ -1216,10 +1431,182 @@ function renderCompare(){
     </tr>`).join('')}</tbody></table></div>`;
 }
 
+// ══ 이상형 월드컵 ══
+function shuffleArr(arr){
+  const a=[...arr];
+  for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+  return a;
+}
+function buildWorldcupRound(itemIdxs){
+  const shuffled = shuffleArr(itemIdxs);
+  const round = [];
+  for(let i=0;i<shuffled.length;i+=2){
+    if(i+1 < shuffled.length) round.push({ a: shuffled[i], b: shuffled[i+1], votes:{}, winner:null });
+    else round.push({ a: shuffled[i], b: null, votes:{}, winner: shuffled[i] }); // bye
+  }
+  return round;
+}
+window.startWorldcup = async function(){
+  if(isProjectReadOnly()) return;
+  const accs = project.accommodations||[];
+  if(accs.length < 2){ showToast('숙소가 2개 이상 있어야 시작할 수 있어요!'); return; }
+  const items = accs.map((a,i)=>({ name:a.name, price:a.price||'', photos:a.photos||[], link:a.link||'', accIdx:i }));
+  const round0 = buildWorldcupRound(items.map((_,i)=>i));
+  project.worldcup = { active:true, items, bracket:[round0], round:0, winner:null };
+  playSound('travel');
+  await saveProject();
+  renderWorldcup(document.getElementById('compare-content'));
+}
+window.voteWorldcup = async function(matchIdx, choice){
+  if(isProjectReadOnly() || !currentUser) return;
+  const wc = project.worldcup; if(!wc || !wc.active) return;
+  const match = wc.bracket[wc.round][matchIdx];
+  if(!match || match.winner!=null) return; // bye or already decided
+  if(!match.votes) match.votes={};
+  match.votes[currentUser.uid] = choice;
+  playSound('pop');
+  isRemoteUpdate = true;
+  try {
+    await update(ref(db,'projects/'+projectCode), { [`worldcup/bracket/${wc.round}/${matchIdx}/votes/${currentUser.uid}`]: choice });
+  } catch(e) {}
+  setTimeout(()=> isRemoteUpdate=false, 500);
+  renderWorldcup(document.getElementById('compare-content'));
+}
+window.advanceWorldcupRound = async function(){
+  if(isProjectReadOnly()) return;
+  const wc = project.worldcup; if(!wc || !wc.active) return;
+  const round = wc.bracket[wc.round];
+  const winners = round.map(m=>{
+    if(m.winner!=null) return m.winner;
+    const votes = m.votes||{};
+    let aCount=0,bCount=0;
+    Object.values(votes).forEach(v=>{ if(v==='a') aCount++; else if(v==='b') bCount++; });
+    m.winner = (bCount>aCount) ? m.b : m.a;
+    return m.winner;
+  });
+  if(winners.length===1){
+    wc.winner = winners[0];
+    wc.active = false;
+    playSound('save');
+  } else {
+    wc.bracket.push(buildWorldcupRound(winners));
+    wc.round++;
+    playSound('travel');
+  }
+  await saveProject();
+  renderWorldcup(document.getElementById('compare-content'));
+}
+window.resetWorldcup = async function(){
+  if(isProjectReadOnly()) return;
+  project.worldcup = null;
+  playSound('click');
+  await saveProject();
+  renderWorldcup(document.getElementById('compare-content'));
+}
+window.confirmWorldcupWinner = async function(){
+  if(isProjectReadOnly()) return;
+  const wc = project.worldcup; if(!wc || wc.winner==null) return;
+  const item = wc.items[wc.winner];
+  if(item && project.accommodations[item.accIdx]){
+    project.accommodations.forEach(a=>a.confirmed=false);
+    project.accommodations[item.accIdx].confirmed = true;
+    playSound('save');
+    await saveProject();
+    showToast('✅ 우승 숙소를 확정했어요!');
+    renderWorldcup(document.getElementById('compare-content'));
+  }
+}
+function wcMatchLabel(matchCount){
+  if(matchCount===1) return '🏆 결승';
+  if(matchCount===2) return '🥈 준결승';
+  if(matchCount===4) return '🥉 8강';
+  return `Round of ${matchCount*2}`;
+}
+function wcPhoto(item){
+  return (item.photos&&item.photos[0]) ? `<img src="${item.photos[0]}" onerror="this.parentElement.classList.add('wc-noimg')">` : '';
+}
+function renderWorldcup(el){
+  if(!el) return;
+  const wc = project.worldcup;
+  if(!wc){
+    const accs = project.accommodations||[];
+    el.innerHTML = `<div class="wc-intro">
+      <div class="wc-intro-emoji">🏆</div>
+      <div class="wc-intro-title">이상형 월드컵으로 숙소를 정해보세요!</div>
+      <div class="wc-intro-sub">등록된 숙소들을 토너먼트로 비교하고, 함께 투표해서 최종 1등을 골라봐요.</div>
+      ${accs.length>=2
+        ? `<button class="btn-main btn-orange" onclick="startWorldcup()">🏆 이상형 월드컵 시작하기 (${accs.length}개 숙소)</button>`
+        : `<div class="empty-hint">숙소를 2개 이상 등록하면 시작할 수 있어요!</div>`}
+    </div>`;
+    return;
+  }
+  if(!wc.active && wc.winner!=null){
+    const item = wc.items[wc.winner];
+    const isConfirmed = item && project.accommodations[item.accIdx] && project.accommodations[item.accIdx].confirmed;
+    el.innerHTML = `<div class="wc-intro wc-result">
+      <div class="wc-intro-emoji">🎉</div>
+      <div class="wc-intro-title">최종 우승!</div>
+      <div class="wc-winner-card">
+        <div class="wc-winner-photo">${wcPhoto(item)}</div>
+        <div class="wc-winner-name">${item.name}</div>
+        <div class="wc-winner-price">${item.price||''}</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:16px;">
+        <button class="btn-main btn-orange" onclick="confirmWorldcupWinner()" ${isConfirmed?'disabled':''}>${isConfirmed?'✅ 확정 완료':'✅ 이 숙소로 확정하기'}</button>
+        <button class="btn-main btn-outline" onclick="resetWorldcup()">🔄 다시 시작하기</button>
+      </div>
+    </div>`;
+    return;
+  }
+  const round = wc.bracket[wc.round];
+  const myUid = currentUser ? currentUser.uid : null;
+  el.innerHTML = `
+    <div class="wc-round-title">${wcMatchLabel(round.length)}</div>
+    <div class="wc-matches">
+      ${round.map((m,mi)=>{
+        const itemA = wc.items[m.a];
+        const itemB = m.b!=null ? wc.items[m.b] : null;
+        const votes = m.votes||{};
+        let aCount=0,bCount=0;
+        Object.values(votes).forEach(v=>{ if(v==='a') aCount++; else if(v==='b') bCount++; });
+        const myVote = myUid ? votes[myUid] : null;
+        if(!itemB){
+          return `<div class="wc-match">
+            <div class="wc-side wc-bye">
+              <div class="wc-photo">${wcPhoto(itemA)}</div>
+              <div class="wc-name">${itemA.name}</div>
+              <div class="wc-bye-label">부전승 ⭐</div>
+            </div>
+          </div>`;
+        }
+        return `<div class="wc-match">
+          <div class="wc-side ${myVote==='a'?'wc-voted':''}" onclick="voteWorldcup(${mi},'a')">
+            <div class="wc-photo">${wcPhoto(itemA)}</div>
+            <div class="wc-name">${itemA.name}</div>
+            <div class="wc-price">${itemA.price||''}</div>
+            <div class="wc-votes">🗳️ ${aCount}표</div>
+          </div>
+          <div class="wc-vs">VS</div>
+          <div class="wc-side ${myVote==='b'?'wc-voted':''}" onclick="voteWorldcup(${mi},'b')">
+            <div class="wc-photo">${wcPhoto(itemB)}</div>
+            <div class="wc-name">${itemB.name}</div>
+            <div class="wc-price">${itemB.price||''}</div>
+            <div class="wc-votes">🗳️ ${bCount}표</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:16px;">
+      <button class="btn-main btn-orange" onclick="advanceWorldcupRound()">${round.length===1?'🏆 우승 발표!':'다음 라운드로 ➡️'}</button>
+      <button class="btn-main btn-outline" onclick="resetWorldcup()">🔄 처음부터 다시</button>
+    </div>
+  `;
+}
+
 // ══ MEMO (디바운스 자동저장: 입력 멈춘 후 동기화) ══
 let memoSaveTimeout = null;
 window.handleMemoInput = function() {
-  if(!project) return;
+  if(!project || isProjectReadOnly()) return;
   const el = document.getElementById('memo-text');
   project.memo = el.value;
   setText('status-memo', '✏️ 입력 중...');
@@ -1233,6 +1620,7 @@ window.handleMemoInput = function() {
 // ══ PACKING ══
 window.addPackItem=function(e){ if(e.key==='Enter') window.addPackItemBtn(); }
 window.addPackItemBtn=async function(){
+  if(isProjectReadOnly()) return;
   const v=document.getElementById('pack-input').value.trim(); if(!v) return;
   if(!project.packList) project.packList=[];
   project.packList.push({text:v,done:false});
@@ -1250,16 +1638,18 @@ function renderPackList(){
     </div>`).join('');
   setText('status-pack', project.packList.length+'개');
 }
-window.togglePack=async function(i){ project.packList[i].done=!project.packList[i].done; await saveProject(); renderPackList(); }
-window.deletePack=async function(i){ project.packList.splice(i,1); await saveProject(); renderPackList(); }
+window.togglePack=async function(i){ if(isProjectReadOnly()) return; project.packList[i].done=!project.packList[i].done; await saveProject(); renderPackList(); }
+window.deletePack=async function(i){ if(isProjectReadOnly()) return; project.packList.splice(i,1); await saveProject(); renderPackList(); }
 
 // ══ OUTFIT ══
 window.selectOutfit=async function(el,key){
+  if(isProjectReadOnly()) return;
   document.querySelectorAll('.outfit-card').forEach(c=>c.classList.remove('selected'));
   el.classList.add('selected');
   if(project){ project.outfit=key; setText('status-outfit', el.querySelector('.outfit-label').textContent); await saveProject(); }
 }
 window.saveOutfit=async function(){
+  if(isProjectReadOnly()) return;
   if(project){ project.outfitMemo=document.getElementById('outfit-memo').value; await saveProject(); showToast('👗 저장!'); }
 }
 
@@ -1322,7 +1712,153 @@ function renderTravelAcc(){
       </div>
       ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
       ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
-      ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+      ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+    </div>`).join('');
+}
+function renderTravelFun(){
+  const el=document.getElementById('travel-fun-content');
+  const list=(project.funList||[]);
+  if(!list.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 놀거리가 없어요 🎡<br><small>플래닝 모드에서 추가해주세요!</small></div>'; return; }
+  el.innerHTML=list.map(f=>`
+    <div class="acc-card travel-confirmed">
+      <div class="acc-card-header"><div class="acc-card-title">🎡 ${f.name}</div></div>
+      ${f.link?`<a class="acc-card-link" href="${f.link}" target="_blank">🔗 참고 사이트</a>`:''}
+      ${f.memo?`<div style="font-size:13px;color:#777;margin-top:8px;line-height:1.5;">${f.memo}</div>`:''}
+      ${(f.photos||[]).length?`<div class="acc-photos">${f.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+    </div>`).join('');
+}
+
+// ══ 리뷰 (인스타 감성) ══
+let reviewRating = 0;
+let reviewTempPhotos = [];
+function getReviewTargets(){
+  const targets = [{type:'general', label:'✨ 전체 여행 / 기타'}];
+  (project.accommodations||[]).forEach(a => targets.push({type:'acc', label:'🏨 '+a.name}));
+  (project.funList||[]).forEach(f => targets.push({type:'fun', label:'🎡 '+f.name}));
+  (project.schedule||[]).forEach(d => (d.items||[]).forEach(it => targets.push({type:'schedule', label:`📅 ${d.label} - ${it.text}`})));
+  return targets;
+}
+window.openReviewModal = function(){
+  if(isProjectReadOnly()) return;
+  reviewRating = 0;
+  reviewTempPhotos = [];
+  renderReviewStars();
+  document.getElementById('review-photo-list').innerHTML='';
+  setText('review-photo-status','');
+  setValue('review-text','');
+  const targets = getReviewTargets();
+  document.getElementById('review-target').innerHTML = targets.map(t=>`<option value="${escapeHtml(t.label)}">${t.label}</option>`).join('');
+  setupImgurFileInput('review-photo-file','review-photo-status',(url)=>{
+    if(reviewTempPhotos.length>=6){ showToast('사진은 최대 6개!'); return; }
+    reviewTempPhotos.push(url); renderReviewPhotoList();
+    showToast('✅ 사진 업로드 완료!');
+  });
+  playSound('pop');
+  document.getElementById('modal-review').classList.remove('hidden');
+}
+window.setReviewRating = function(n){
+  reviewRating = n;
+  renderReviewStars();
+  playSound('pop');
+}
+function renderReviewStars(){
+  const el = document.getElementById('review-stars');
+  if(!el) return;
+  el.innerHTML = [1,2,3,4,5].map(n=>`<span class="star-pick ${n<=reviewRating?'filled':''}" onclick="setReviewRating(${n})">⭐</span>`).join('');
+}
+function renderReviewPhotoList(){
+  document.getElementById('review-photo-list').innerHTML = reviewTempPhotos.map((p,i)=>`
+    <div class="photo-item">
+      <img src="${p}" onerror="this.src=''" style="width:70px;height:60px;object-fit:cover;border-radius:10px;">
+      <button class="rm-photo" onclick="removeReviewPhoto(${i})">×</button>
+    </div>`).join('');
+}
+window.removeReviewPhoto = function(i){ reviewTempPhotos.splice(i,1); renderReviewPhotoList(); }
+window.saveReview = async function(){
+  if(isProjectReadOnly()) return;
+  if(!reviewRating){ showToast('별점을 선택해주세요! ⭐'); return; }
+  const text = document.getElementById('review-text').value.trim();
+  if(!text){ showToast('리뷰 내용을 입력해주세요!'); return; }
+  const targetLabel = document.getElementById('review-target').value;
+  if(!project.reviews) project.reviews=[];
+  const review = {
+    id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    targetLabel, rating: reviewRating, text, photos:[...reviewTempPhotos],
+    authorUid: currentUser?currentUser.uid:'', authorName: (userProfile&&userProfile.nickname)||'여행자',
+    authorPhoto: (userProfile&&userProfile.photo)||AVATAR_LIST[0],
+    ts: Date.now(), comments: []
+  };
+  project.reviews.unshift(review);
+  playSound('save');
+  await saveProject();
+  closeModal('modal-review');
+  renderReviewFeed();
+  showToast('✅ 리뷰가 등록되었어요!');
+}
+window.deleteReview = async function(id){
+  if(isProjectReadOnly()) return;
+  const idx = (project.reviews||[]).findIndex(r=>r.id===id);
+  if(idx<0) return;
+  const r = project.reviews[idx];
+  const isMine = currentUser && r.authorUid===currentUser.uid;
+  const isHost = !!(project && currentUser && project.hostUid===currentUser.uid);
+  if(!isMine && !isHost){ showToast('⚠️ 본인 리뷰만 삭제할 수 있어요'); return; }
+  project.reviews.splice(idx,1);
+  await saveProject();
+  renderReviewFeed();
+  showToast('🗑️ 리뷰를 삭제했어요');
+}
+window.addReviewComment = async function(id){
+  if(isProjectReadOnly() || !currentUser) return;
+  const input = document.getElementById('review-comment-'+id);
+  if(!input) return;
+  const text = input.value.trim(); if(!text) return;
+  const review = (project.reviews||[]).find(r=>r.id===id);
+  if(!review) return;
+  if(!review.comments) review.comments=[];
+  review.comments.push({
+    uid: currentUser.uid, nickname:(userProfile&&userProfile.nickname)||'여행자',
+    photo:(userProfile&&userProfile.photo)||AVATAR_LIST[0], text, ts: Date.now()
+  });
+  input.value='';
+  playSound('pop');
+  await saveProject();
+  renderReviewFeed();
+}
+function renderReviewFeed(){
+  const el = document.getElementById('review-feed');
+  if(!el) return;
+  const reviews = project.reviews||[];
+  if(!reviews.length){
+    el.innerHTML = '<div class="empty-hint">아직 리뷰가 없어요! 📸<br>여행 중 추억과 평가를 남겨보세요</div>';
+    return;
+  }
+  el.innerHTML = reviews.map(r=>`
+    <div class="review-card">
+      <div class="review-header">
+        <img class="review-avatar" src="${getPhotoUrl(r.authorPhoto)}" onerror="this.style.display='none'">
+        <div class="review-header-info">
+          <div class="review-author">${escapeHtml(r.authorName)}</div>
+          <div class="review-target">${escapeHtml(r.targetLabel)}</div>
+        </div>
+        <div class="review-stars-display">${'⭐'.repeat(r.rating)}</div>
+      </div>
+      ${(r.photos&&r.photos.length)?`<div class="review-photos">${r.photos.map(p=>`<div class="review-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
+      <div class="review-text">${escapeHtml(r.text)}</div>
+      <div class="review-time">${new Date(r.ts).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+      <div class="review-comments">
+        ${(r.comments||[]).map(c=>`
+          <div class="review-comment">
+            <img class="review-comment-avatar" src="${getPhotoUrl(c.photo)}" onerror="this.style.display='none'">
+            <span class="review-comment-name">${escapeHtml(c.nickname)}</span>
+            <span class="review-comment-text">${escapeHtml(c.text)}</span>
+          </div>`).join('')}
+      </div>
+      <div class="review-comment-input-row">
+        <input type="text" id="review-comment-${r.id}" class="review-field" placeholder="댓글 달기..." onkeydown="if(event.key==='Enter')addReviewComment('${r.id}')">
+        <button onclick="addReviewComment('${r.id}')">등록</button>
+      </div>
+      ${(currentUser && (r.authorUid===currentUser.uid || (project && project.hostUid===currentUser.uid)))?`<button class="review-delete-btn" onclick="deleteReview('${r.id}')">🗑️ 삭제</button>`:''}
     </div>`).join('');
 }
 
@@ -1340,6 +1876,7 @@ window.copyInviteMsg=function(){
   showToast('📤 초대 메시지 복사!');
 }
 window.changePw=async function(){
+  if(isProjectReadOnly()) return;
   const pw=document.getElementById('new-pw').value;
   project.password=pw; await saveProject();
   showToast(pw?'🔒 비밀번호 설정!':'🔓 잠금 해제!');
@@ -1350,6 +1887,27 @@ window.closeModal=closeModal;
 function updateStatusBadge(type){
   if(type==='acc') setText('status-acc',(project.accommodations||[]).length+'개');
   if(type==='fun') setText('status-fun',(project.funList||[]).length+'개');
+}
+
+// Reflects the project's actual saved state in the planning menu badges.
+// Called on every project load/refresh so "미입력"/"선택사항" don't show
+// stale placeholders after a page reload even though data was saved.
+const OUTFIT_LABELS = { casual:'캐주얼', chic:'시크&세련', sporty:'스포티', cute:'큐트&러블리', outdoor:'아웃도어', vintage:'빈티지' };
+function updateAllStatusBadges(){
+  if(!project) return;
+  const infoFilled = !!(project.place || project.start || project.end || project.transport ||
+    (project.themes&&project.themes.length) || (project.members&&project.members.length) || project.budget);
+  const infoEl = document.getElementById('status-info');
+  if(infoEl){
+    infoEl.textContent = infoFilled ? '✅ 입력됨' : '미입력';
+    infoEl.className = 'card-status' + (infoFilled ? ' done' : '');
+  }
+  setText('status-acc', (project.accommodations||[]).length+'개');
+  setText('status-schedule', (project.schedule&&project.schedule.length) ? project.schedule.length+'일' : '선택사항');
+  setText('status-fun', (project.funList||[]).length+'개');
+  setText('status-memo', project.memo ? '✅ 작성됨' : '비어있음');
+  setText('status-pack', (project.packList||[]).length+'개');
+  setText('status-outfit', project.outfit ? (OUTFIT_LABELS[project.outfit]||'설정됨') : '미정');
 }
 </script>
 <style>
@@ -1445,8 +2003,15 @@ function updateStatusBadge(type){
   .acc-notes{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;}
   .acc-note-tag{background:#FFF8F2;border:1px solid #FFE0C8;border-radius:50px;padding:3px 10px;font-size:11px;color:#888;}
   .acc-photos{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
-  .acc-photo{width:70px;height:60px;border-radius:var(--radius-sm);overflow:hidden;background:#FFE8D0;}
+  .acc-photo{width:70px;height:60px;border-radius:var(--radius-sm);overflow:hidden;background:#FFE8D0;cursor:pointer;transition:transform .15s;}
+  .acc-photo:hover{transform:scale(1.05);}
   .acc-photo img{width:100%;height:100%;object-fit:cover;}
+
+  /* IMAGE LIGHTBOX */
+  .image-view-overlay{background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;cursor:zoom-out;z-index:900;}
+  .image-view-img{max-width:92vw;max-height:88vh;border-radius:12px;cursor:default;box-shadow:0 8px 40px rgba(0,0,0,.5);}
+  .image-view-close{position:absolute;top:18px;right:22px;background:rgba(255,255,255,.15);border:none;color:#fff;width:40px;height:40px;border-radius:50%;font-size:18px;cursor:pointer;}
+  .image-view-close:hover{background:rgba(255,255,255,.3);}
   .acc-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
   .acc-btn{padding:6px 14px;border-radius:50px;border:none;font-size:12px;font-weight:600;cursor:pointer;transition:all .2s;}
   .acc-btn-confirm{background:#FF8C42;color:#fff;}
@@ -1458,6 +2023,10 @@ function updateStatusBadge(type){
   .add-card-btn:hover{background:#FFE8D0;}
 
   /* PHOTO URL input */
+  .photo-upload-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+  .photo-upload-btn{display:inline-block;padding:9px 16px;background:#FFF3E8;border:2px dashed #FFD0B0;border-radius:50px;font-size:12px;font-weight:700;color:#FF8C42;cursor:pointer;transition:all .15s;}
+  .photo-upload-btn:hover{background:#FFE8D0;}
+  .photo-upload-status{font-size:12px;color:#aaa;}
   .photo-url-row{display:flex;gap:8px;margin-bottom:8px;}
   .photo-url-row input{flex:1;padding:9px 12px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:13px;outline:none;}
   .photo-url-row input:focus{border-color:#FF8C42;}
@@ -1496,6 +2065,69 @@ function updateStatusBadge(type){
   .compare-table td{padding:10px 12px;font-size:13px;color:#555;border-bottom:1px solid #FFE8D0;text-align:center;}
   .compare-table tr:last-child td{border-bottom:none;}
   .compare-table tr:hover td{background:#FFF8F2;}
+
+  /* COMPARE TABS */
+  .compare-tabs{display:flex;gap:8px;margin-bottom:14px;}
+  .compare-tab-btn{flex:1;padding:10px;border:2px solid #FFE0C8;background:#fff;border-radius:50px;font-size:13px;font-weight:700;color:#aaa;cursor:pointer;transition:all .15s;}
+  .compare-tab-btn.active{background:#FF8C42;color:#fff;border-color:#FF8C42;}
+
+  /* 이상형 월드컵 */
+  .wc-intro{background:#fff;border-radius:var(--radius);padding:32px 20px;text-align:center;box-shadow:var(--shadow-card);}
+  .wc-intro-emoji{font-size:48px;margin-bottom:10px;}
+  .wc-intro-title{font-size:16px;font-weight:800;color:#333;margin-bottom:8px;}
+  .wc-intro-sub{font-size:13px;color:#aaa;line-height:1.6;margin-bottom:18px;}
+  .wc-round-title{text-align:center;font-size:15px;font-weight:800;color:#FF8C42;margin-bottom:14px;}
+  .wc-matches{display:flex;flex-direction:column;gap:14px;}
+  .wc-match{display:flex;align-items:center;gap:10px;background:#fff;border-radius:var(--radius);padding:14px;box-shadow:var(--shadow-card);}
+  .wc-side{flex:1;text-align:center;cursor:pointer;border-radius:var(--radius-sm);padding:10px;border:3px solid transparent;transition:all .15s;}
+  .wc-side:hover{background:#FFF8F2;}
+  .wc-side.wc-voted{border-color:#FF8C42;background:#FFF3E8;}
+  .wc-side.wc-bye{flex:1;cursor:default;}
+  .wc-side.wc-bye:hover{background:none;}
+  .wc-photo{width:100%;height:90px;border-radius:10px;overflow:hidden;background:#FFE8D0;margin-bottom:8px;}
+  .wc-photo img{width:100%;height:100%;object-fit:cover;}
+  .wc-noimg{display:flex;align-items:center;justify-content:center;}
+  .wc-noimg::before{content:'🏨';font-size:28px;}
+  .wc-name{font-size:13px;font-weight:800;color:#333;}
+  .wc-price{font-size:11px;color:#aaa;margin-top:2px;}
+  .wc-votes{font-size:11px;color:#FF8C42;font-weight:700;margin-top:4px;}
+  .wc-bye-label{font-size:12px;color:#FFB380;font-weight:700;margin-top:4px;}
+  .wc-vs{font-size:13px;font-weight:800;color:#FFD0B0;flex-shrink:0;}
+  .wc-result{padding:32px 20px;}
+  .wc-winner-card{margin:14px auto 0;max-width:240px;}
+  .wc-winner-photo{width:100%;height:160px;border-radius:var(--radius);overflow:hidden;background:#FFE8D0;margin-bottom:10px;}
+  .wc-winner-photo img{width:100%;height:100%;object-fit:cover;}
+  .wc-winner-photo .wc-noimg::before{font-size:48px;}
+  .wc-winner-name{font-size:16px;font-weight:800;color:#333;}
+  .wc-winner-price{font-size:13px;color:#aaa;margin-top:2px;}
+
+  /* 리뷰 (인스타 감성) */
+  .star-picker{display:flex;gap:6px;font-size:28px;}
+  .star-picker .star-pick{cursor:pointer;filter:grayscale(1) opacity(.35);transition:all .1s;}
+  .star-picker .star-pick.filled{filter:none;transform:scale(1.1);}
+  .review-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:16px;}
+  .review-header{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+  .review-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;}
+  .review-header-info{flex:1;min-width:0;}
+  .review-author{font-size:13px;font-weight:800;color:#333;}
+  .review-target{font-size:11px;color:#aaa;margin-top:1px;}
+  .review-stars-display{font-size:13px;flex-shrink:0;letter-spacing:1px;}
+  .review-photos{display:flex;gap:6px;overflow-x:auto;margin-bottom:10px;padding-bottom:2px;}
+  .review-photo{width:110px;height:110px;border-radius:var(--radius-sm);overflow:hidden;flex-shrink:0;background:#FFE8D0;cursor:pointer;}
+  .review-photo img{width:100%;height:100%;object-fit:cover;}
+  .review-text{font-size:13px;color:#555;line-height:1.6;white-space:pre-wrap;}
+  .review-time{font-size:11px;color:#ccc;margin-top:8px;}
+  .review-comments{margin-top:10px;display:flex;flex-direction:column;gap:6px;}
+  .review-comment{display:flex;align-items:center;gap:6px;font-size:12px;color:#666;}
+  .review-comment-avatar{width:20px;height:20px;border-radius:50%;object-fit:cover;flex-shrink:0;}
+  .review-comment-name{font-weight:700;color:#333;flex-shrink:0;}
+  .review-comment-text{word-break:break-word;}
+  .review-comment-input-row{display:flex;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid #FFF0E5;}
+  .review-comment-input-row input{flex:1;padding:8px 12px;border:2px solid #FFE0C8;border-radius:50px;font-size:12px;outline:none;font-family:inherit;}
+  .review-comment-input-row input:focus{border-color:#FF8C42;}
+  .review-comment-input-row button{padding:8px 14px;background:#FF8C42;color:#fff;border:none;border-radius:50px;font-size:12px;font-weight:700;cursor:pointer;}
+  .review-delete-btn{margin-top:10px;background:none;border:none;color:#ddd;font-size:11px;cursor:pointer;}
+  .review-delete-btn:hover{color:#e74c3c;}
 
   /* OUTFIT */
   .outfit-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
@@ -1562,6 +2194,9 @@ function updateStatusBadge(type){
   .project-list{display:flex;flex-direction:column;gap:12px;}
   .project-card{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);display:flex;align-items:center;gap:14px;cursor:pointer;transition:all .2s;border:2px solid transparent;}
   .project-card:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(255,140,66,.15);border-color:#FFB380;}
+  .past-project-card{opacity:.8;}
+  .past-project-card:hover{border-color:#D8C8B8;}
+  .past-project-card .project-card-thumb{background:#F0EBE3;}
   .project-card-thumb{font-size:30px;width:54px;height:54px;border-radius:var(--radius-sm);background:#FFF3E8;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
   .project-card-info{flex:1;min-width:0;}
   .project-card-name{font-size:15px;font-weight:800;color:#333;margin-bottom:4px;}
@@ -1601,6 +2236,40 @@ function updateStatusBadge(type){
   /* DANGER BUTTON */
   .danger-btn{width:100%;padding:14px;border:2px solid #ffb3b3;background:#FFF0F0;color:#e74c3c;border-radius:var(--radius);font-size:14px;font-weight:700;cursor:pointer;margin-top:24px;transition:all .2s;}
   .danger-btn:hover{background:#ffe0e0;}
+  .end-trip-btn{width:100%;padding:14px;border:2px solid #b3e0c4;background:#F0FFF6;color:#2E9E5B;border-radius:var(--radius);font-size:14px;font-weight:700;cursor:pointer;margin-top:24px;transition:all .2s;}
+  .end-trip-btn:hover{background:#e0ffe9;}
+
+  /* ARCHIVED / 지난 여행 읽기전용 */
+  .archived-banner{background:#FFF3D6;border:2px solid #FFE0A0;border-radius:var(--radius-sm);padding:12px 14px;font-size:12px;color:#B8860B;line-height:1.6;margin-bottom:16px;font-weight:600;}
+  body.readonly-mode .add-card-btn,
+  body.readonly-mode .acc-actions,
+  body.readonly-mode .add-item-row,
+  body.readonly-mode .member-kick-btn,
+  body.readonly-mode .invite-banner-btn,
+  body.readonly-mode .del-check,
+  body.readonly-mode .drag-handle,
+  body.readonly-mode #sub-info .tag-input-wrap,
+  body.readonly-mode .save-btn:not(.review-save-btn):not(.copy-code-btn),
+  body.readonly-mode .photo-upload-row:not(.review-field-row),
+  body.readonly-mode .photo-url-row:not(.review-field-row) {
+    display:none !important;
+  }
+  body.readonly-mode input:not(.review-field),
+  body.readonly-mode select:not(.review-field),
+  body.readonly-mode textarea:not(.review-field) {
+    pointer-events:none;
+    background:#f5f5f5 !important;
+    opacity:.8;
+  }
+  body.readonly-mode .outfit-card,
+  body.readonly-mode .check-item input[type="checkbox"],
+  body.readonly-mode .wc-side,
+  body.readonly-mode #compare-content > div > button {
+    pointer-events:none;
+    opacity:.65;
+  }
+  [data-theme="dark"] .end-trip-btn{background:rgba(46,158,91,.12);border-color:rgba(46,158,91,.4);color:#7be0a8;}
+  [data-theme="dark"] .archived-banner{background:rgba(255,224,160,.12);border-color:rgba(255,224,160,.3);color:#ffd98a;}
 
   /* TOGGLE SWITCH */
   .toggle-row{display:flex;align-items:center;justify-content:space-between;background:#FFF8F2;border-radius:var(--radius-sm);padding:12px 14px;font-size:13px;color:#666;font-weight:600;}
@@ -1622,6 +2291,7 @@ function updateStatusBadge(type){
   .theme-preview-dark::after{content:'✦ ⋆ ✦ ⋆';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;opacity:.7;letter-spacing:4px;}
   .theme-preview-summer{background:linear-gradient(135deg,#A8D8FF,#FFD0E8);}
   .theme-option-label{font-size:11px;font-weight:700;color:#888;}
+  .setup-hint{background:#FFF8F2;border-radius:var(--radius-sm);padding:10px 14px;font-size:12px;color:#aaa;text-align:center;margin:16px 0;line-height:1.6;}
 
   /* THEME BACKGROUNDS */
   .theme-bg{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;display:none;}
@@ -1658,6 +2328,7 @@ function updateStatusBadge(type){
   .chat-name{font-size:11px;color:#aaa;margin-bottom:2px;}
   .chat-bubble{background:#FFF3E8;border-radius:14px;padding:8px 12px;font-size:13px;color:#444;line-height:1.5;word-break:break-word;display:inline-block;text-align:left;}
   .chat-msg.mine .chat-bubble{background:#FF8C42;color:#fff;}
+  .chat-time{font-size:10px;color:#ccc;margin-top:2px;}
   .chat-input-row{display:flex;gap:8px;padding:12px;border-top:1px solid #FFF0E5;flex-shrink:0;}
   .chat-input-row input{flex:1;padding:10px 14px;border:2px solid #FFE0C8;border-radius:50px;font-size:13px;outline:none;font-family:inherit;}
   .chat-input-row input:focus{border-color:#FF8C42;}
@@ -1672,7 +2343,7 @@ function updateStatusBadge(type){
   /* ══════════ DARK NIGHT THEME ══════════ */
   [data-theme="dark"] body,[data-theme="dark"] body.travel-mode{background:transparent;}
   [data-theme="dark"] #screen-loading,[data-theme="dark"] #screen-login,[data-theme="dark"] #screen-profile-setup,[data-theme="dark"] #screen-settings,[data-theme="dark"] #screen-create{background:transparent;}
-  [data-theme="dark"] .app-header,[data-theme="dark"] .menu-card,[data-theme="dark"] .acc-card,[data-theme="dark"] .create-box,[data-theme="dark"] .join-box,[data-theme="dark"] .modal,[data-theme="dark"] .info-form,[data-theme="dark"] .memo-box,[data-theme="dark"] .confirmed-display,[data-theme="dark"] .schedule-day,[data-theme="dark"] .check-item,[data-theme="dark"] .compare-table,[data-theme="dark"] .random-box,[data-theme="dark"] .join-box-inline,[data-theme="dark"] .project-card,[data-theme="dark"] .empty-hint,[data-theme="dark"] .outfit-card,[data-theme="dark"] .members-section,[data-theme="dark"] .chat-panel,[data-theme="dark"] .share-code-display,[data-theme="dark"] .member-chip,[data-theme="dark"] .toggle-row{
+  [data-theme="dark"] .app-header,[data-theme="dark"] .menu-card,[data-theme="dark"] .acc-card,[data-theme="dark"] .create-box,[data-theme="dark"] .join-box,[data-theme="dark"] .modal,[data-theme="dark"] .info-form,[data-theme="dark"] .memo-box,[data-theme="dark"] .confirmed-display,[data-theme="dark"] .schedule-day,[data-theme="dark"] .check-item,[data-theme="dark"] .compare-table,[data-theme="dark"] .random-box,[data-theme="dark"] .join-box-inline,[data-theme="dark"] .project-card,[data-theme="dark"] .empty-hint,[data-theme="dark"] .outfit-card,[data-theme="dark"] .members-section,[data-theme="dark"] .chat-panel,[data-theme="dark"] .share-code-display,[data-theme="dark"] .member-chip,[data-theme="dark"] .toggle-row,[data-theme="dark"] .setup-hint{
     background:rgba(35,25,60,.78); color:#e6d6ff; box-shadow:0 4px 20px rgba(0,0,0,.4);
   }
   [data-theme="dark"] .compare-table td{color:#ddd;border-bottom-color:rgba(255,255,255,.08);}
@@ -1681,7 +2352,7 @@ function updateStatusBadge(type){
   [data-theme="dark"] .header-project,[data-theme="dark"] .header-project.travel,[data-theme="dark"] .section-title,[data-theme="dark"] .sub-page-title,[data-theme="dark"] .acc-card-title,[data-theme="dark"] .project-card-name,[data-theme="dark"] .schedule-text,[data-theme="dark"] .check-item label,[data-theme="dark"] .confirmed-value,[data-theme="dark"] #dash-nickname,[data-theme="dark"] .home-title,[data-theme="dark"] .create-box h2,[data-theme="dark"] .join-box h2,[data-theme="dark"] .members-section-title,[data-theme="dark"] .chat-panel-title{
     color:#e6d6ff;
   }
-  [data-theme="dark"] .menu-card .card-label,[data-theme="dark"] .card-status,[data-theme="dark"] .acc-card-price,[data-theme="dark"] .project-card-meta,[data-theme="dark"] .home-sub,[data-theme="dark"] .form-group label,[data-theme="dark"] .guide-body,[data-theme="dark"] .schedule-time,[data-theme="dark"] .acc-note-tag,[data-theme="dark"] .confirmed-sub,[data-theme="dark"] .code-hint,[data-theme="dark"] .member-name,[data-theme="dark"] .chat-name{
+  [data-theme="dark"] .menu-card .card-label,[data-theme="dark"] .card-status,[data-theme="dark"] .acc-card-price,[data-theme="dark"] .project-card-meta,[data-theme="dark"] .home-sub,[data-theme="dark"] .form-group label,[data-theme="dark"] .guide-body,[data-theme="dark"] .schedule-time,[data-theme="dark"] .acc-note-tag,[data-theme="dark"] .confirmed-sub,[data-theme="dark"] .code-hint,[data-theme="dark"] .member-name,[data-theme="dark"] .chat-name,[data-theme="dark"] .chat-time{
     color:#b8a8d8;
   }
   [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .acc-note-tag{
@@ -1707,12 +2378,31 @@ function updateStatusBadge(type){
   [data-theme="dark"] .acc-btn-edit{background:rgba(255,255,255,.08);color:#cbb8e6;}
   [data-theme="dark"] .acc-photo,[data-theme="dark"] .project-card-thumb{background:rgba(155,77,255,.12);}
   [data-theme="dark"] .danger-btn{background:rgba(231,76,60,.12);border-color:rgba(231,76,60,.4);color:#ff8f8f;}
+  [data-theme="dark"] .photo-upload-btn{background:rgba(155,77,255,.12);border-color:rgba(155,77,255,.4);color:#d3b8ff;}
+  [data-theme="dark"] .photo-upload-status{color:#8d7caa;}
   [data-theme="dark"] .theme-option.selected{border-color:#a855f7;}
+  [data-theme="dark"] .wc-intro,[data-theme="dark"] .wc-match{background:rgba(35,25,60,.78);box-shadow:0 4px 20px rgba(0,0,0,.4);}
+  [data-theme="dark"] .wc-intro-title,[data-theme="dark"] .wc-name,[data-theme="dark"] .wc-winner-name{color:#e6d6ff;}
+  [data-theme="dark"] .wc-intro-sub,[data-theme="dark"] .wc-price,[data-theme="dark"] .wc-winner-price{color:#b8a8d8;}
+  [data-theme="dark"] .wc-side:hover{background:rgba(255,255,255,.05);}
+  [data-theme="dark"] .wc-side.wc-voted{background:rgba(155,77,255,.18);border-color:#a855f7;}
+  [data-theme="dark"] .wc-votes,[data-theme="dark"] .wc-round-title,[data-theme="dark"] .wc-bye-label{color:#c9a8ff;}
+  [data-theme="dark"] .wc-photo,[data-theme="dark"] .wc-winner-photo{background:rgba(155,77,255,.12);}
+  [data-theme="dark"] .compare-tab-btn{background:rgba(255,255,255,.06);border-color:rgba(155,77,255,.35);color:#8d7caa;}
+  [data-theme="dark"] .compare-tab-btn.active{background:#7b2ff7;color:#fff;border-color:#7b2ff7;}
+  [data-theme="dark"] .review-card{background:rgba(35,25,60,.78);box-shadow:0 4px 20px rgba(0,0,0,.4);}
+  [data-theme="dark"] .review-author,[data-theme="dark"] .review-comment-name{color:#e6d6ff;}
+  [data-theme="dark"] .review-target,[data-theme="dark"] .review-time,[data-theme="dark"] .review-comment{color:#b8a8d8;}
+  [data-theme="dark"] .review-text{color:#d8c9f0;}
+  [data-theme="dark"] .review-photo{background:rgba(155,77,255,.12);}
+  [data-theme="dark"] .review-comment-input-row{border-top-color:rgba(155,77,255,.2);}
+  [data-theme="dark"] .review-comment-input-row input{background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);}
+  [data-theme="dark"] .review-comment-input-row button{background:linear-gradient(135deg,#7b2ff7,#a855f7);}
 
   /* ══════════ BLUE SUMMER THEME ══════════ */
   [data-theme="summer"] body,[data-theme="summer"] body.travel-mode{background:transparent;}
   [data-theme="summer"] #screen-loading,[data-theme="summer"] #screen-login,[data-theme="summer"] #screen-profile-setup,[data-theme="summer"] #screen-settings,[data-theme="summer"] #screen-create{background:transparent;}
-  [data-theme="summer"] .app-header,[data-theme="summer"] .menu-card,[data-theme="summer"] .acc-card,[data-theme="summer"] .create-box,[data-theme="summer"] .join-box,[data-theme="summer"] .modal,[data-theme="summer"] .info-form,[data-theme="summer"] .memo-box,[data-theme="summer"] .confirmed-display,[data-theme="summer"] .schedule-day,[data-theme="summer"] .check-item,[data-theme="summer"] .compare-table,[data-theme="summer"] .random-box,[data-theme="summer"] .join-box-inline,[data-theme="summer"] .project-card,[data-theme="summer"] .empty-hint,[data-theme="summer"] .outfit-card,[data-theme="summer"] .members-section,[data-theme="summer"] .chat-panel,[data-theme="summer"] .share-code-display,[data-theme="summer"] .member-chip,[data-theme="summer"] .toggle-row{
+  [data-theme="summer"] .app-header,[data-theme="summer"] .menu-card,[data-theme="summer"] .acc-card,[data-theme="summer"] .create-box,[data-theme="summer"] .join-box,[data-theme="summer"] .modal,[data-theme="summer"] .info-form,[data-theme="summer"] .memo-box,[data-theme="summer"] .confirmed-display,[data-theme="summer"] .schedule-day,[data-theme="summer"] .check-item,[data-theme="summer"] .compare-table,[data-theme="summer"] .random-box,[data-theme="summer"] .join-box-inline,[data-theme="summer"] .project-card,[data-theme="summer"] .empty-hint,[data-theme="summer"] .outfit-card,[data-theme="summer"] .members-section,[data-theme="summer"] .chat-panel,[data-theme="summer"] .share-code-display,[data-theme="summer"] .member-chip,[data-theme="summer"] .toggle-row,[data-theme="summer"] .setup-hint{
     background:rgba(255,255,255,.8);
   }
   [data-theme="summer"] .header-project,[data-theme="summer"] .header-project.travel,[data-theme="summer"] .section-title,[data-theme="summer"] .sub-page-title,[data-theme="summer"] .home-title,[data-theme="summer"] .create-box h2,[data-theme="summer"] .join-box h2{
@@ -1731,6 +2421,14 @@ function updateStatusBadge(type){
   [data-theme="summer"] .chat-bubble{background:rgba(74,144,217,.12);color:#2a5d8f;}
   [data-theme="summer"] .chat-msg.mine .chat-bubble{background:#4A90D9;color:#fff;}
   [data-theme="summer"] .theme-option.selected{border-color:#4A90D9;}
+  [data-theme="summer"] .wc-intro,[data-theme="summer"] .wc-match{background:rgba(255,255,255,.8);}
+  [data-theme="summer"] .wc-intro-title,[data-theme="summer"] .wc-name,[data-theme="summer"] .wc-winner-name,[data-theme="summer"] .wc-round-title{color:#2E7FD9;}
+  [data-theme="summer"] .wc-side.wc-voted{background:rgba(74,144,217,.12);border-color:#4A90D9;}
+  [data-theme="summer"] .wc-votes{color:#2E7FD9;}
+  [data-theme="summer"] .compare-tab-btn.active{background:#4A90D9;border-color:#4A90D9;}
+  [data-theme="summer"] .review-card{background:rgba(255,255,255,.8);}
+  [data-theme="summer"] .review-author{color:#2E7FD9;}
+  [data-theme="summer"] .review-comment-input-row button{background:linear-gradient(135deg,#4A90D9,#FF8FC1);}
 </style>
 </head>
 <body>
@@ -1788,7 +2486,7 @@ function updateStatusBadge(type){
   <div style="padding:16px;max-width:460px;width:100%;margin:0 auto;">
     <div class="create-box">
       <h2>👋 처음이시네요!</h2>
-      <div style="text-align:center;font-size:13px;color:#aaa;margin-bottom:20px;">닉네임과 프로필 아바타를 설정해주세요</div>
+      <div style="text-align:center;font-size:13px;color:#aaa;margin-bottom:20px;">닉네임과 프로필 아바타, 테마를 설정해주세요</div>
       <div class="form-group">
         <label>닉네임</label>
         <input type="text" id="profile-nickname" placeholder="예: 마덕이">
@@ -1797,6 +2495,24 @@ function updateStatusBadge(type){
         <label>🖼️ 프로필 아바타 선택</label>
         <div class="avatar-grid" id="avatar-grid"></div>
       </div>
+      <div class="form-group">
+        <label>🎨 테마 선택</label>
+        <div class="theme-grid" id="profile-theme-grid">
+          <div class="theme-option" data-theme-id="default" onclick="selectProfileTheme('default')">
+            <div class="theme-preview theme-preview-default"></div>
+            <div class="theme-option-label">기본</div>
+          </div>
+          <div class="theme-option" data-theme-id="dark" onclick="selectProfileTheme('dark')">
+            <div class="theme-preview theme-preview-dark"></div>
+            <div class="theme-option-label">다크 나이트</div>
+          </div>
+          <div class="theme-option" data-theme-id="summer" onclick="selectProfileTheme('summer')">
+            <div class="theme-preview theme-preview-summer"></div>
+            <div class="theme-option-label">푸르른 여름</div>
+          </div>
+        </div>
+      </div>
+      <div class="setup-hint">💡 나중에 설정에서 테마와 프로필 사진 등을 변경할 수 있어요</div>
       <button class="btn-main btn-orange" style="width:100%;" onclick="saveProfile()">✅ 설정 완료하고 시작하기</button>
     </div>
   </div>
@@ -1829,8 +2545,11 @@ function updateStatusBadge(type){
         <button class="btn-main btn-outline" style="width:100%;margin-top:10px;" onclick="dashboardJoin()">참여하기 →</button>
       </div>
     </div>
-    <div class="section-title" style="margin-top:24px;">🧳 내 여행 목록</div>
+    <div class="section-title" style="margin-top:24px;">🧳 진행 중인 여행</div>
     <div class="project-list" id="dashboard-project-list"></div>
+    <div class="section-title" style="margin-top:24px;" id="dashboard-past-section">📦 지난 여행
+      <div class="project-list" id="dashboard-past-list" style="margin-top:12px;"></div>
+    </div>
   </div>
 </div>
 
@@ -1919,6 +2638,7 @@ function updateStatusBadge(type){
     </div>
   </div>
   <div class="main-content">
+    <div class="archived-banner" style="display:none;">📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 트레블 모드에서 계속 남길 수 있어요!</div>
     <button class="invite-banner-btn" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
     <div class="members-section">
       <div class="members-section-title">👥 참여 중인 멤버</div>
@@ -2083,6 +2803,10 @@ function updateStatusBadge(type){
   </div>
   <div class="main-content">
     <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🆚 숙소 비교</div></div>
+    <div class="compare-tabs">
+      <button class="compare-tab-btn active" data-tab="table" onclick="switchCompareTab('table')">📊 비교표</button>
+      <button class="compare-tab-btn" data-tab="worldcup" onclick="switchCompareTab('worldcup')">🏆 이상형 월드컵</button>
+    </div>
     <div id="compare-content"></div>
   </div>
 </div>
@@ -2176,6 +2900,7 @@ function updateStatusBadge(type){
     </div>
   </div>
   <div class="main-content">
+    <div class="archived-banner" style="display:none;">📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 계속 남길 수 있어요!</div>
     <button class="invite-banner-btn travel" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
     <div class="members-section">
       <div class="members-section-title">👥 참여 중인 멤버</div>
@@ -2187,9 +2912,12 @@ function updateStatusBadge(type){
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-schedule')"><div class="card-icon">📅</div><div class="card-label">오늘 일정</div></div>
       <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-review')"><div class="card-icon">📸</div><div class="card-label">여행 리뷰</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물 체크</div></div>
     </div>
+    <button class="end-trip-btn host-only-end" style="display:none;" onclick="openEndTripConfirm()">🏁 여행 끝내기 (방장 전용)</button>
   </div>
 </div>
 
@@ -2288,6 +3016,49 @@ function updateStatusBadge(type){
   </div>
 </div>
 
+<!-- TRAVEL: FUN -->
+<div class="screen" id="sub-travel-fun">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">🎡 놀거리</div>
+      <div class="mode-toggle">
+        <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+        <button class="mode-btn active-travel">🧳 트레블</button>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="tfun-mini">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-travel-fun')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎡 놀거리</div></div>
+    <div id="travel-fun-content"></div>
+  </div>
+</div>
+
+<!-- TRAVEL: REVIEW -->
+<div class="screen" id="sub-travel-review">
+  <div class="app-header travel">
+    <div class="header-top">
+      <div class="header-project travel">📸 여행 리뷰</div>
+      <div class="mode-toggle">
+        <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
+        <button class="mode-btn active-travel">🧳 트레블</button>
+      </div>
+    </div>
+    <div class="info-bar-mini">
+      <span class="info-chip-mini" id="treview-mini">📅</span>
+      <button class="mini-toggle-btn" onclick="toggleMiniBar('sub-travel-review')">︿</button>
+    </div>
+  </div>
+  <div class="main-content">
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div></div>
+    <button class="btn-main btn-orange" style="width:100%;margin-bottom:16px;" onclick="openReviewModal()">✏️ 리뷰 작성하기</button>
+    <div id="review-feed"></div>
+  </div>
+</div>
+
 <!-- MODAL: ACCOMMODATION -->
 <div class="modal-overlay hidden" id="modal-acc">
   <div class="modal">
@@ -2301,9 +3072,13 @@ function updateStatusBadge(type){
       <div class="tag-list" id="acc-note-tags"></div>
     </div>
     <div class="form-group">
-      <label>사진 URL 추가</label>
+      <label>사진 추가 (직접 업로드 또는 URL)</label>
+      <div class="photo-upload-row">
+        <label class="photo-upload-btn" for="acc-photo-file">📷 사진 업로드<input type="file" accept="image/*" id="acc-photo-file" style="display:none;"></label>
+        <span class="photo-upload-status" id="acc-photo-status"></span>
+      </div>
       <div class="photo-url-row">
-        <input type="url" id="acc-photo-url" placeholder="https://이미지URL.jpg">
+        <input type="url" id="acc-photo-url" placeholder="또는 https://이미지URL.jpg">
         <button class="acc-btn acc-btn-confirm" onclick="addAccPhotoUrl()">추가</button>
       </div>
       <div class="photo-list" id="acc-photo-list"></div>
@@ -2320,9 +3095,13 @@ function updateStatusBadge(type){
     <div class="form-group"><label>링크 (참고 사이트)</label><input type="url" id="fun-link" placeholder="https://..."></div>
     <div class="form-group"><label>메모 / 자료</label><textarea id="fun-memo" placeholder="가격, 운영시간, 특이사항 등" style="width:100%;min-height:80px;border:2px solid #FFE0C8;border-radius:12px;padding:12px;font-size:14px;font-family:inherit;resize:vertical;outline:none;"></textarea></div>
     <div class="form-group">
-      <label>사진 URL 추가</label>
+      <label>사진 추가 (직접 업로드 또는 URL)</label>
+      <div class="photo-upload-row">
+        <label class="photo-upload-btn" for="fun-photo-file">📷 사진 업로드<input type="file" accept="image/*" id="fun-photo-file" style="display:none;"></label>
+        <span class="photo-upload-status" id="fun-photo-status"></span>
+      </div>
       <div class="photo-url-row">
-        <input type="url" id="fun-photo-url" placeholder="https://이미지URL.jpg">
+        <input type="url" id="fun-photo-url" placeholder="또는 https://이미지URL.jpg">
         <button class="acc-btn acc-btn-confirm" onclick="addFunPhotoUrl()">추가</button>
       </div>
       <div class="photo-list" id="fun-photo-list"></div>
@@ -2341,7 +3120,7 @@ function updateStatusBadge(type){
       <div class="share-code" id="share-code-display">TRIP-XXXX</div>
       <div style="font-size:12px;color:#aaa;margin-top:4px;">이 코드를 친구에게 알려주세요!</div>
     </div>
-    <button class="save-btn" onclick="copyCode()" style="margin-bottom:12px;">📋 코드 복사하기</button>
+    <button class="save-btn copy-code-btn" onclick="copyCode()" style="margin-bottom:12px;">📋 코드 복사하기</button>
     <div style="font-size:13px;font-weight:700;color:#888;margin-bottom:8px;">초대 메시지 보내기</div>
     <div class="invite-row">
       <input type="text" id="invite-name" placeholder="친구 이름">
@@ -2395,11 +3174,25 @@ function updateStatusBadge(type){
 <!-- MODAL: DELETE CONFIRM -->
 <div class="modal-overlay hidden" id="modal-delete">
   <div class="modal">
-    <h3>⚠️ 프로젝트 삭제 <button class="close-btn" onclick="closeModal('modal-delete')">✕</button></h3>
-    <div style="font-size:14px;color:#666;line-height:1.7;margin-bottom:18px;">이 프로젝트의 모든 데이터(숙소, 일정, 놀거리, 메모 등)가 <b style="color:#e74c3c;">영구적으로 삭제</b>되며, 되돌릴 수 없어요. 정말 삭제하시겠어요?</div>
+    <h3>⚠️ 프로젝트 영구 삭제 <button class="close-btn" onclick="closeModal('modal-delete')">✕</button></h3>
+    <div style="font-size:14px;color:#666;line-height:1.7;margin-bottom:10px;">이 프로젝트의 모든 데이터(숙소, 일정, 놀거리, 메모, 리뷰 등)가 <b style="color:#e74c3c;">완전히 영구 삭제</b>되며, <b style="color:#e74c3c;">절대 되돌릴 수 없어요</b>.</div>
+    <div style="font-size:13px;color:#aaa;line-height:1.6;margin-bottom:18px;background:#FFF8F2;border-radius:var(--radius-sm);padding:10px 12px;">💡 여행을 추억으로 남기고 싶다면 "삭제"가 아니라 트레블 모드의 <b>🏁 여행 끝내기</b>를 사용해보세요. 그러면 "지난 여행"에 보관되어 나중에 다시 볼 수 있어요!</div>
     <div style="display:flex;gap:8px;">
       <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-delete')">취소</button>
-      <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmDeleteProject()">🗑️ 영구 삭제</button>
+      <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmDeleteProject()">🗑️ 정말로 영구 삭제</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: END TRIP CONFIRM -->
+<div class="modal-overlay hidden" id="modal-end-trip">
+  <div class="modal">
+    <h3>🏁 여행 끝내기 <button class="close-btn" onclick="closeModal('modal-end-trip')">✕</button></h3>
+    <div style="font-size:14px;color:#666;line-height:1.7;margin-bottom:10px;"><b style="color:#4CAF50;">삭제가 아니에요!</b> 이 여행을 종료하면 대시보드의 <b>"📦 지난 여행"</b> 목록으로 이동해요. 데이터는 그대로 보관되고, 리뷰는 계속 남길 수 있어요. 다만 더 이상 일정/숙소 등은 수정할 수 없어요.</div>
+    <div style="font-size:13px;color:#aaa;line-height:1.6;margin-bottom:18px;">정말 여행을 종료하시겠어요?</div>
+    <div style="display:flex;gap:8px;">
+      <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-end-trip')">취소</button>
+      <button class="acc-btn acc-btn-confirm" style="flex:1;padding:12px;font-size:14px;" onclick="confirmEndTrip()">🏁 여행 종료하기</button>
     </div>
   </div>
 </div>
@@ -2413,6 +3206,40 @@ function updateStatusBadge(type){
       <button class="acc-btn acc-btn-edit" style="flex:1;padding:12px;font-size:14px;" onclick="closeModal('modal-kick')">취소</button>
       <button class="acc-btn acc-btn-del" style="flex:1;padding:12px;font-size:14px;" onclick="confirmKickMember()">👋 강퇴하기</button>
     </div>
+  </div>
+</div>
+
+<!-- MODAL: IMAGE LIGHTBOX -->
+<div class="modal-overlay hidden image-view-overlay" id="modal-image-view" onclick="closeImageView()">
+  <button class="image-view-close" onclick="closeImageView()">✕</button>
+  <img id="image-view-img" class="image-view-img" src="" onclick="event.stopPropagation()">
+</div>
+
+<!-- MODAL: REVIEW -->
+<div class="modal-overlay hidden" id="modal-review">
+  <div class="modal">
+    <h3>📸 리뷰 작성 <button class="close-btn" onclick="closeModal('modal-review')">✕</button></h3>
+    <div class="form-group">
+      <label>무엇에 대한 리뷰인가요?</label>
+      <select id="review-target" class="review-field"></select>
+    </div>
+    <div class="form-group">
+      <label>별점</label>
+      <div class="star-picker" id="review-stars"></div>
+    </div>
+    <div class="form-group">
+      <label>리뷰 내용</label>
+      <textarea id="review-text" class="review-field" placeholder="여행은 어땠나요? 솔직한 후기를 남겨주세요 ✍️" style="width:100%;min-height:90px;border:2px solid #FFE0C8;border-radius:12px;padding:12px;font-size:14px;font-family:inherit;resize:vertical;outline:none;"></textarea>
+    </div>
+    <div class="form-group">
+      <label>인증샷 추가 (최대 6개)</label>
+      <div class="photo-upload-row review-field-row">
+        <label class="photo-upload-btn" for="review-photo-file">📷 사진 업로드<input type="file" accept="image/*" id="review-photo-file" style="display:none;"></label>
+        <span class="photo-upload-status" id="review-photo-status"></span>
+      </div>
+      <div class="photo-list" id="review-photo-list"></div>
+    </div>
+    <button class="save-btn review-save-btn" onclick="saveReview()">리뷰 등록하기</button>
   </div>
 </div>
 
