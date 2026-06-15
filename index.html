@@ -833,8 +833,192 @@ window.confirmEndTrip = async function() {
 
 // ══ GUIDE MODAL ══
 window.openGuideModal = function() {
+  renderFullGuide();
   playSound('pop');
   document.getElementById('modal-guide').classList.remove('hidden');
+}
+
+// ══ 화면별 이용방법 ══
+const SCREEN_GUIDES = {
+  'sub-info': {
+    title: '📋 기본 정보 - 이용방법',
+    sections: [
+      ['✏️ 무엇을 입력하나요?', '여행 이름, 장소, 시작일/종료일, 이동수단, 예산을 입력해요. 모두 선택사항이니 아는 만큼만 채워도 괜찮아요.'],
+      ['🏷️ 멤버 / 테마 추가하기', '입력칸에 이름이나 테마를 적고 <b>+ 버튼</b>(또는 엔터)을 누르면 태그로 추가돼요. 태그를 눌러서 삭제할 수도 있어요.'],
+      ['💾 저장하기', '다 입력했으면 맨 아래 <b>"저장 & 공유하기"</b> 버튼을 눌러야 모든 멤버에게 실시간으로 공유돼요.']
+    ]
+  },
+  'sub-acc': {
+    title: '🏨 숙소 리스트 - 이용방법',
+    sections: [
+      ['➕ 숙소 추가하기', '<b>"+ 숙소 추가하기"</b> 버튼을 눌러 이름, 1박 가격, 예약 사이트 링크, 특이사항(최대 5개), 사진을 등록할 수 있어요.'],
+      ['↕️ 순서 바꾸기', '숙소 카드를 길게 눌러 드래그하면 순서를 바꿀 수 있어요. 위에 있을수록 우선순위가 높다는 뜻으로 활용해보세요.'],
+      ['✅ 확정하기', '카드의 <b>"확정"</b> 버튼을 누르면 이 숙소가 트레블 모드의 <b>🏨 확정 숙소</b> 화면에 표시돼요. 여러 곳을 비교하다 마음에 드는 곳이 생기면 확정해보세요!'],
+      ['🆚 비교하고 싶다면', '숙소가 2개 이상이면 <b>🆚 숙소 비교</b> 메뉴에서 표로 비교하거나, 이상형 월드컵으로 투표해서 정할 수 있어요.']
+    ]
+  },
+  'sub-schedule': {
+    title: '📅 일정 입력 - 이용방법',
+    sections: [
+      ['📆 날짜 추가하기', '<b>"+ 날짜 추가"</b>를 누르면 여행 시작일부터 하루씩 날짜가 추가돼요.'],
+      ['📅 일정 추가하기', '각 날짜 아래 <b>"📅 일정"</b> 탭에서 시간과 내용을 입력하고 <b>"추가"</b>를 누르세요. <b>📍 버튼</b>을 누르면 카카오맵으로 장소를 검색해서 위치 정보를 함께 등록할 수 있어요. (직접 입력도 가능!)'],
+      ['🚌 교통수단 추가하기', '<b>"🚌 교통수단"</b> 탭으로 바꾸면, 시간 + 버스/지하철/자동차/도보 중 선택 + 상세정보(버스 번호, 노선 등)를 입력할 수 있어요. <b>🗺️ 버튼</b>을 누르면 카카오맵에서 어떤 교통수단을 타야 할지 미리 확인할 수 있어요.'],
+      ['🗺️ 길찾기', '교통수단 항목 옆에 자동으로 생기는 <b>"🗺️ 길찾기"</b> 링크를 누르면, 다음 일정 장소까지의 길찾기가 카카오맵에서 열려요. (장소를 검색해서 등록해둔 경우에만 표시돼요)']
+    ]
+  },
+  'sub-fun': {
+    title: '🎡 놀거리 리스트 - 이용방법',
+    sections: [
+      ['➕ 추가하기', '<b>"+ 놀거리 추가하기"</b>를 눌러 하고 싶은 활동의 이름, 메모, 사진을 등록해보세요.'],
+      ['🎲 활용하기', '여기에 등록한 놀거리들은 트레블 모드의 <b>🎲 놀거리 뽑기</b>에서 랜덤으로 뽑을 수 있어요. 뭘 할지 못 정했을 때 친구들과 같이 뽑아보세요!']
+    ]
+  },
+  'sub-compare': {
+    title: '🆚 숙소 비교 - 이용방법',
+    sections: [
+      ['📊 비교표', '등록된 숙소들의 이름·가격·특이사항을 표로 한눈에 비교할 수 있어요. 숙소가 2개 이상 등록되어야 표시돼요.'],
+      ['🏆 이상형 월드컵', '숙소가 2개 이상이면 <b>"🏆 이상형 월드컵"</b> 탭에서 토너먼트 투표를 시작할 수 있어요. 모든 멤버가 실시간으로 투표하고, 다음 라운드로 진행하면서 최종 우승 숙소를 정해보세요. 우승하면 바로 <b>확정</b> 처리할 수 있어요.']
+    ]
+  },
+  'sub-memo': {
+    title: '📝 메모 - 이용방법',
+    sections: [
+      ['✍️ 자유롭게 작성', '필요한 내용을 자유롭게 적어보세요. 체크리스트, 공유 계좌, 잡담 등 무엇이든 좋아요.'],
+      ['💾 자동 저장', '입력을 멈추면 약 0.8초 후 자동으로 저장돼요. 따로 저장 버튼을 누를 필요가 없어요. 모든 멤버가 실시간으로 함께 볼 수 있어요.']
+    ]
+  },
+  'sub-pack': {
+    title: '🎒 준비물 - 이용방법',
+    sections: [
+      ['➕ 추가하기', '입력칸에 준비물 이름을 적고 <b>엔터</b> 또는 <b>"추가"</b> 버튼을 누르세요.'],
+      ['✅ 체크 / 삭제', '챙긴 준비물은 체크박스를 눌러 완료 표시할 수 있어요. 옆의 <b>×</b>를 누르면 삭제돼요. 트레블 모드의 <b>🎒 준비물 체크</b>에서도 동일한 목록을 확인/체크할 수 있어요.']
+    ]
+  },
+  'sub-outfit': {
+    title: '👗 옷차림 · 컨셉 - 이용방법',
+    sections: [
+      ['🎨 컨셉 선택', '마음에 드는 옷차림 컨셉 카드를 선택하면 자동으로 표시돼요.'],
+      ['📝 메모 작성', '준비물, 색상 코디, 주의할 점 등을 메모로 남기고 <b>"저장"</b> 버튼을 누르세요.']
+    ]
+  },
+  'sub-transport-summary': {
+    title: '🚌 교통/동선 요약 - 이용방법',
+    sections: [
+      ['📋 자동으로 모아보기', '<b>📅 일정 입력</b>에서 등록한 모든 교통수단(버스·지하철·자동차·도보) 항목들이 날짜별로 자동으로 모여서 표시돼요. 따로 입력할 필요는 없어요!'],
+      ['🗺️ 길찾기', '각 항목의 <b>"🗺️ 길찾기"</b>를 누르면 다음 목적지까지 카카오맵에서 길찾기를 바로 확인할 수 있어요. 일정에 등록된 항목이 없다면 이 화면도 비어있을 거예요 — <b>📅 일정 입력</b>에서 교통수단을 추가해보세요!']
+    ]
+  },
+  'sub-travel-summary': {
+    title: '📋 플랜 요약 - 이용방법',
+    sections: [
+      ['👀 한눈에 확인', '플래닝 모드에서 입력한 기본 정보, 숙소, 일정 등을 여행 중 빠르게 확인할 수 있는 요약 화면이에요. 별도로 입력할 내용은 없고, 플래닝에서 입력한 내용이 자동으로 반영돼요.']
+    ]
+  },
+  'sub-travel-schedule': {
+    title: '📅 오늘 일정 - 이용방법',
+    sections: [
+      ['🗓️ 일정 확인', '플래닝에서 등록한 전체 일정(장소·교통수단 포함)을 날짜별로 확인할 수 있어요. 📍 위치 태그나 🗺️ 길찾기 링크를 눌러 바로 카카오맵으로 이동할 수 있어요.'],
+      ['✏️ 수정하려면', '일정 내용을 수정하거나 추가하려면 🏠 홈 화면으로 나가서 🗓 플래닝 모드의 <b>📅 일정 입력</b>에서 변경해주세요.']
+    ]
+  },
+  'sub-travel-random': {
+    title: '🎲 놀거리 랜덤 뽑기 - 이용방법',
+    sections: [
+      ['🎲 뽑기', '<b>🎡 놀거리 리스트</b>에 등록된 항목 중 하나를 랜덤으로 뽑아줘요. 뭘 할지 못 정했을 때 버튼을 눌러 친구들과 같이 결과를 확인해보세요!'],
+      ['📭 목록이 비어있다면', '플래닝 모드의 <b>🎡 놀거리</b>에서 먼저 후보를 등록해주세요.']
+    ]
+  },
+  'sub-travel-acc': {
+    title: '🏨 확정 숙소 - 이용방법',
+    sections: [
+      ['✅ 확정된 숙소만 표시', '플래닝의 <b>🏨 숙소 리스트</b>에서 <b>"확정"</b> 처리한 숙소들만 모아서 보여줘요. 예약 링크와 특이사항을 여행 중에 빠르게 확인할 수 있어요.'],
+      ['📭 비어있다면', '아직 확정한 숙소가 없다는 뜻이에요. 🏠 홈 화면 → 🗓 플래닝 → 🏨 숙소 리스트에서 확정해주세요.']
+    ]
+  },
+  'sub-travel-fun': {
+    title: '🎡 놀거리 - 이용방법',
+    sections: [
+      ['👀 목록 확인', '플래닝에서 등록한 놀거리 후보들을 여행 중에 확인할 수 있어요. 무엇을 할지 고민될 땐 <b>🎲 놀거리 뽑기</b>로 랜덤 추천도 받아보세요.']
+    ]
+  },
+  'sub-travel-review': {
+    title: '📸 여행 리뷰 - 이용방법',
+    sections: [
+      ['📝 멤버별 총평', '화면 상단에서 각자 여행에 대한 한 줄 총평을 작성/수정할 수 있어요. 작성 후 <b>"총평 등록"</b>을 누르면 모두에게 공유돼요.'],
+      ['✏️ 리뷰 작성하기', '<b>"✏️ 리뷰 작성하기"</b>를 누르면 카테고리(숙소/놀거리/일정/먹거리/장소/추억/기타)를 고르고, 별점·위치·시간·날씨·기분·사진과 함께 리뷰를 남길 수 있어요.'],
+      ['🔍 카테고리별 보기', '리뷰 목록 위의 필터 탭을 눌러 카테고리별로 리뷰를 모아볼 수 있어요.'],
+      ['💬 댓글 / 삭제', '각 리뷰 아래 입력창으로 댓글을 남길 수 있어요. 본인이 작성한 리뷰나, 방장이라면 다른 사람의 리뷰도 <b>🗑️ 삭제</b>할 수 있어요.'],
+      ['🔍 프로젝트 상세 보기', '화면 맨 아래 버튼을 누르면 플래닝/트레블 메뉴 전체를 볼 수 있어요. (지난 여행에서는 리뷰만 작성/수정 가능하고 다른 정보는 읽기 전용이에요)']
+    ]
+  }
+};
+function buildGuideSectionsHTML(sections){
+  return sections.map(([title,body]) => `
+    <div class="guide-section">
+      <div class="guide-title">${title}</div>
+      <div class="guide-body">${body}</div>
+    </div>`).join('');
+}
+window.openScreenGuide = function(screenId){
+  const g = SCREEN_GUIDES[screenId];
+  if(!g) return;
+  document.getElementById('screen-guide-title').textContent = g.title;
+  document.getElementById('screen-guide-body').innerHTML = buildGuideSectionsHTML(g.sections);
+  playSound('pop');
+  document.getElementById('modal-screen-guide').classList.remove('hidden');
+}
+
+// ══ 전체 이용방법 (플래닝/트레블 공용 모달) ══
+const GENERAL_GUIDE_SECTIONS = {
+  start: [
+    ['1️⃣ 로그인 & 프로필 설정', 'Google 계정으로 간편하게 로그인할 수 있어요. 처음 로그인하면 닉네임, 프로필 아바타(6종 중 선택), 테마를 설정하는 화면이 나타나요. 이후에도 대시보드 상단의 <b>⚙️ 설정</b>에서 언제든지 자유롭게 변경할 수 있어요.'],
+    ['2️⃣ 테마 변경하기', '<b>⚙️ 설정</b> 화면에서 <b>기본(오렌지) / 다크 나이트 / 푸르른 여름</b> 3가지 테마 중 하나를 선택할 수 있어요. 선택 즉시 전체 화면 색상이 바뀌고, 미리보기로 확인 후 고를 수 있어요. 테마는 내 화면에만 적용되고 다른 멤버에게는 영향을 주지 않아요.'],
+    ['3️⃣ 효과음 설정', '<b>⚙️ 설정</b>에서 효과음 ON/OFF를 토글할 수 있어요. 켜두면 버튼 클릭, 저장, 알림 등에 짧은 사운드가 재생돼요.']
+  ],
+  project: [
+    ['4️⃣ 새 프로젝트 만들기', '대시보드의 <b>✨ 새 프로젝트 만들기</b> 버튼을 누르면 여행 이름, 시작일/종료일, 비밀번호(선택, 잠금용)를 입력해서 새 여행 플랜을 만들 수 있어요. 생성하면 고유 초대 코드(예: TRIP-A1B2)가 자동 발급되고, 만든 사람이 자동으로 <b>방장</b>이 돼요.'],
+    ['5️⃣ 초대 코드로 참여하기', '대시보드의 <b>🔑 초대 코드로 참여하기</b>에 친구가 알려준 코드(예: TRIP-A1B2)와 비밀번호(있다면)를 입력하고 <b>"참여하기 →"</b>를 누르면 같은 프로젝트에 함께 참여할 수 있어요.'],
+    ['6️⃣ 친구 초대하기 / 코드 공유', '여행 화면 상단의 <b>코드 배지(TRIP-XXXX 📋)</b>를 누르면 공유 창이 열려요. <b>"📋 코드 복사하기"</b>로 코드를 복사해서 친구에게 보내주세요. 이 창에서 비밀번호를 새로 설정하거나 변경/해제할 수도 있어요.'],
+    ['7️⃣ 멤버 목록 & 온라인 상태', '플래닝/트레블 메인 화면의 <b>"👥 참여 중인 멤버"</b> 섹션에서 현재 참여 중인 멤버들의 닉네임과 아바타를 확인할 수 있어요. 점이 초록색이면 온라인, 회색이면 오프라인이에요. 방장 옆에는 <b>(방장)</b> 표시가 붙어요.'],
+    ['8️⃣ 멤버 강퇴하기', '방장만 멤버 목록에서 다른 멤버 옆의 <b>✕</b> 버튼을 눌러 강퇴할 수 있어요. 강퇴된 멤버는 같은 코드로 다시 참여할 수 없어요. (자기 자신은 강퇴할 수 없어요)'],
+    ['9️⃣ 방장 권한', '프로젝트를 처음 만든 사람이 자동으로 방장이 돼요. 방장만 <b>멤버 강퇴</b>, <b>프로젝트 영구 삭제</b>, <b>🏁 여행 끝내기</b>를 할 수 있어요.'],
+    ['🔟 실시간 채팅', '화면 우측 하단의 💬 버튼을 누르면 채팅창이 열려요. 모든 멤버와 실시간으로 대화할 수 있고, 누군가 타이핑 중이면 "OO님이 입력 중..."이 표시돼요.'],
+    ['1️⃣1️⃣ 플래닝 ↔ 트레블 모드 전환', '화면 상단의 <b>🗓 플래닝 / 🧳 트레블</b> 토글로 언제든지 모드를 바꿀 수 있어요. <b>플래닝</b>은 여행을 준비하는 모드(정보 입력), <b>트레블</b>은 여행 중에 빠르게 확인/즐기는 모드예요.'],
+    ['1️⃣2️⃣ 홈 화면으로 돌아가기', '화면 상단의 <b>🏠 홈 화면으로</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.']
+  ],
+  endtrip: [
+    ['🏁 여행 끝내기', '트레블 모드 메뉴 하단의 <b>🏁 여행 끝내기 (방장 전용)</b> 버튼을 누르면 이 여행이 종료돼요. <b>삭제가 아니에요!</b> 데이터는 그대로 보관되고, 대시보드의 <b>📦 지난 여행</b> 목록으로 이동해요. 종료 후에는 더 이상 일정/숙소 등을 수정할 수 없지만, <b>리뷰와 멤버 총평은 계속 작성/수정</b>할 수 있어요. 종료 시 다른 멤버들에게도 실시간으로 알림이 가요.'],
+    ['📦 지난 여행 보기', '대시보드의 <b>📦 지난 여행</b> 카드를 누르면 바로 <b>📸 여행 리뷰</b> 화면이 열려요. 화면 하단의 <b>"🔍 프로젝트 상세 보기"</b>를 누르면 플래닝/트레블의 모든 정보를 읽기 전용으로 둘러볼 수 있어요. (다시 리뷰 화면으로 돌아가려면 상단 배너의 "📸 리뷰로 돌아가기"를 누르세요)'],
+    ['🗑️ 프로젝트 영구 삭제', '여행 화면 상단 코드 배지 → 공유 창 하단의 <b>🗑️ 프로젝트 삭제하기 (방장 전용)</b>를 누르면 프로젝트의 모든 데이터가 <b>영구적으로</b> 삭제돼요. 되돌릴 수 없으니, 추억으로 남기고 싶다면 삭제 대신 <b>🏁 여행 끝내기</b>를 사용해주세요.']
+  ]
+};
+const PLAN_ONLY_SCREENS = ['sub-info','sub-schedule','sub-outfit','sub-acc','sub-compare','sub-fun'];
+const TRAVEL_ONLY_SCREENS = ['sub-travel-summary','sub-travel-schedule','sub-travel-random','sub-travel-acc','sub-travel-fun','sub-travel-review'];
+const SHARED_SCREENS = ['sub-memo','sub-pack','sub-transport-summary'];
+function appendScreenGuides(screenIds){
+  let html = '';
+  screenIds.forEach(sid => {
+    const g = SCREEN_GUIDES[sid];
+    if(!g) return;
+    html += `<div class="guide-subdivider">${g.title.replace(' - 이용방법','')}</div>`;
+    html += buildGuideSectionsHTML(g.sections);
+  });
+  return html;
+}
+function renderFullGuide(){
+  let html = '';
+  html += buildGuideSectionsHTML(GENERAL_GUIDE_SECTIONS.start);
+  html += buildGuideSectionsHTML(GENERAL_GUIDE_SECTIONS.project);
+  html += '<div class="guide-divider">🗓 플래닝 모드 - 여행 준비하기</div>';
+  html += appendScreenGuides(PLAN_ONLY_SCREENS);
+  html += '<div class="guide-divider">🧳 트레블 모드 - 여행 즐기기</div>';
+  html += appendScreenGuides(TRAVEL_ONLY_SCREENS);
+  html += '<div class="guide-divider">🔁 플래닝 · 트레블 공통 기능</div>';
+  html += appendScreenGuides(SHARED_SCREENS);
+  html += '<div class="guide-divider">🏁 여행 종료 &amp; 지난 여행</div>';
+  html += buildGuideSectionsHTML(GENERAL_GUIDE_SECTIONS.endtrip);
+  const bodyEl = document.getElementById('modal-guide-body');
+  if(bodyEl) bodyEl.innerHTML = html;
 }
 
 // ══ IMAGE LIGHTBOX ══
@@ -1449,6 +1633,21 @@ function findAdjacentLocation(items, ii, dir){
   }
   return null;
 }
+// 교통수단 "추가" 입력 중일 때: 해당 날짜에 등록된 가장 마지막 위치를 기준으로
+// 카카오맵 길찾기를 열어서 어떤 버스/지하철을 탈지 미리 확인할 수 있게 해줘요.
+window.openTransportRouteHelper = function(di){
+  const items = (project.schedule[di] && project.schedule[di].items) || [];
+  let loc = null;
+  for(let j=items.length-1;j>=0;j--){
+    if(items[j].type!=='transport' && items[j].location){ loc = items[j].location; break; }
+  }
+  if(loc){
+    window.open(kakaoMapLink(loc), '_blank');
+  } else {
+    window.open('https://map.kakao.com', '_blank');
+    showToast('💡 일정에 📍위치를 등록하면 더 정확한 길찾기를 볼 수 있어요!');
+  }
+}
 function renderScheduleItemRow(item, di, ii, showDelete=true){
   const delBtn = showDelete?`<button style="background:none;border:none;color:#ddd;cursor:pointer;" onclick="deleteSchedItem(${di},${ii})">×</button>`:'';
   if(item.type==='transport'){
@@ -1498,6 +1697,7 @@ function renderScheduleList(){
           <option value="walk">🚶 도보</option>
         </select>
         <input type="text" id="tdetail-${di}" placeholder="${TRANSPORT_MODES.bus.placeholder}">
+        <button class="location-search-btn" title="길찾기 (어떤 교통수단을 탈지 확인해보세요)" onclick="openTransportRouteHelper(${di})">🗺️</button>
         <button class="small-btn" onclick="addTransportItem(${di})">추가</button>
       </div>
     </div>`;
@@ -2213,6 +2413,7 @@ function renderReviewFeed(){
 }
 
 // ══ 멤버별 여행 총평 ══
+let overallReviewEditMode = false;
 function renderOverallReviews(){
   const list = document.getElementById('overall-review-list');
   if(!list) return;
@@ -2230,26 +2431,48 @@ function renderOverallReviews(){
         </div>
       </div>`).join('');
   }
+  const inputRow = document.getElementById('overall-review-input-row');
+  const editBtn = document.getElementById('overall-review-edit-btn');
+  const saveBtn = document.getElementById('overall-review-save-btn');
   const input = document.getElementById('my-overall-review');
-  if(input && document.activeElement !== input){
-    const mine = currentUser && overall[currentUser.uid];
-    input.value = mine ? mine.text : '';
+  const mine = currentUser && overall[currentUser.uid];
+  if(mine && !overallReviewEditMode){
+    if(inputRow) inputRow.style.display='none';
+    if(editBtn) editBtn.style.display='';
+  } else {
+    if(inputRow) inputRow.style.display='';
+    if(editBtn) editBtn.style.display='none';
+    if(saveBtn) saveBtn.textContent = mine ? '✅ 수정 완료' : '총평 등록';
+    if(input && document.activeElement !== input) input.value = mine ? mine.text : '';
   }
+}
+window.startEditOverallReview = function(){
+  overallReviewEditMode = true;
+  renderOverallReviews();
+  const input = document.getElementById('my-overall-review');
+  if(input){ input.focus(); }
+  playSound('click');
+}
+window.cancelEditOverallReview = function(){
+  overallReviewEditMode = false;
+  renderOverallReviews();
 }
 window.saveOverallReview = async function(){
   if(!currentUser){ showToast('로그인이 필요해요'); return; }
   const text = document.getElementById('my-overall-review').value.trim();
   if(!text){ showToast('총평을 입력해주세요!'); return; }
   if(!project.overallReviews) project.overallReviews={};
+  const isEdit = !!project.overallReviews[currentUser.uid];
   project.overallReviews[currentUser.uid] = {
     nickname: (userProfile&&userProfile.nickname)||'여행자',
     photo: (userProfile&&userProfile.photo)||AVATAR_LIST[0],
     text, ts: Date.now()
   };
+  overallReviewEditMode = false;
   playSound('save');
   await saveProject();
   renderOverallReviews();
-  showToast('✅ 총평이 등록되었어요!');
+  showToast(isEdit ? '✅ 총평을 수정했어요!' : '✅ 총평이 등록되었어요!');
 }
 
 // ══ SHARE ══
@@ -2637,6 +2860,12 @@ function updateAllStatusBadges(){
   .home-btn.travel{background:#E8F3FF;color:#4A90D9;}
   .home-btn.travel:hover{background:#D0E5FF;}
 
+  /* 화면별 이용방법 버튼 */
+  .guide-btn{margin-left:auto;background:#FFF3E8;border:none;border-radius:50%;width:32px;height:32px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#FF8C42;flex-shrink:0;transition:all .2s;}
+  .guide-btn:hover{background:#FFE0C8;}
+  .guide-btn.travel{background:#E8F3FF;color:#4A90D9;}
+  .guide-btn.travel:hover{background:#D0E5FF;}
+
   /* DASHBOARD */
   #screen-dashboard .app-header{background:#fff;}
   .dash-actions{display:flex;flex-direction:column;gap:14px;}
@@ -2658,6 +2887,9 @@ function updateAllStatusBadges(){
   .guide-section{margin-bottom:16px;}
   .guide-title{font-size:14px;font-weight:800;color:#FF8C42;margin-bottom:6px;}
   .guide-body{font-size:13px;color:#666;line-height:1.7;}
+  .guide-divider{font-size:15px;font-weight:800;color:#333;margin:22px 0 12px;padding-bottom:6px;border-bottom:2px solid #FFE0C8;}
+  .guide-divider:first-child{margin-top:0;}
+  .guide-subdivider{font-size:13px;font-weight:800;color:#4A90D9;margin:14px 0 8px;}
 
   /* LOGOUT BUTTON */
   .header-mini-btn.logout-btn{background:#FFE8E8;color:#e74c3c;font-weight:700;}
@@ -2814,9 +3046,11 @@ function updateAllStatusBadges(){
   [data-theme="dark"] .menu-card .card-label,[data-theme="dark"] .card-status,[data-theme="dark"] .acc-card-price,[data-theme="dark"] .project-card-meta,[data-theme="dark"] .home-sub,[data-theme="dark"] .form-group label,[data-theme="dark"] .guide-body,[data-theme="dark"] .schedule-time,[data-theme="dark"] .acc-note-tag,[data-theme="dark"] .confirmed-sub,[data-theme="dark"] .code-hint,[data-theme="dark"] .member-name,[data-theme="dark"] .chat-name,[data-theme="dark"] .chat-time{
     color:#b8a8d8;
   }
-  [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .home-btn,[data-theme="dark"] .home-btn.travel,[data-theme="dark"] .acc-note-tag{
+  [data-theme="dark"] .info-chip,[data-theme="dark"] .info-chip.travel,[data-theme="dark"] .info-chip-mini,[data-theme="dark"] .header-code,[data-theme="dark"] .header-code.travel,[data-theme="dark"] .tag,[data-theme="dark"] .header-mini-btn,[data-theme="dark"] .header-mini-btn.travel,[data-theme="dark"] .home-btn,[data-theme="dark"] .home-btn.travel,[data-theme="dark"] .guide-btn,[data-theme="dark"] .guide-btn.travel,[data-theme="dark"] .acc-note-tag{
     background:rgba(155,77,255,.18);color:#d3b8ff;
   }
+  [data-theme="dark"] .guide-divider{color:#e6d6ff;border-bottom-color:rgba(155,77,255,.3);}
+  [data-theme="dark"] .guide-subdivider{color:#c9a8ff;}
   [data-theme="dark"] .header-mini-btn.logout-btn{background:rgba(255,94,94,.18);color:#ff9a9a;}
   [data-theme="dark"] .host-badge{color:#c9a8ff;}
   [data-theme="dark"] .member-kick-btn{color:#6b5a8a;}
@@ -2889,6 +3123,9 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .header-code{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .home-btn{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .home-btn.travel{background:rgba(255,143,193,.22);color:#d6589e;}
+  [data-theme="summer"] .guide-btn{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .guide-btn.travel{background:rgba(255,143,193,.22);color:#d6589e;}
+  [data-theme="summer"] .guide-subdivider{color:#2E7FD9;}
   [data-theme="summer"] .tag{background:rgba(74,144,217,.14);color:#2E7FD9;}
   [data-theme="summer"] .host-badge{color:#d6589e;}
   [data-theme="summer"] .btn-orange,[data-theme="summer"] .save-btn,[data-theme="summer"] .spin-btn,[data-theme="summer"] .acc-btn-confirm,[data-theme="summer"] .chat-send-btn{
@@ -3106,6 +3343,7 @@ function updateAllStatusBadges(){
       <div class="header-project" id="plan-header-title">✈️ 여행</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <button class="home-btn" onclick="goToDashboard()">🏠 홈 화면으로</button>
+        <button class="guide-btn" style="margin-left:0;" onclick="openGuideModal()" title="이용방법">📖</button>
         <span class="header-code" id="plan-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn active-plan">🗓 플래닝</button>
@@ -3169,7 +3407,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📋 기본 정보 입력</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📋 기본 정보 입력</div><button class="guide-btn" onclick="openScreenGuide('sub-info')">❓</button></div>
     <div class="info-form">
       <div class="form-group"><label>여행 장소</label><input type="text" id="f-place" placeholder="예: 오사카, 도쿄"></div>
       <div class="form-row">
@@ -3218,7 +3456,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🏨 숙소 리스트</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🏨 숙소 리스트</div><button class="guide-btn" onclick="openScreenGuide('sub-acc')">❓</button></div>
     <div class="acc-list" id="acc-list"></div>
     <button class="add-card-btn" onclick="playSound('pop');openAccModal()">+ 숙소 추가하기</button>
   </div>
@@ -3243,7 +3481,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📅 일정 입력 (선택)</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📅 일정 입력 (선택)</div><button class="guide-btn" onclick="openScreenGuide('sub-schedule')">❓</button></div>
     <div id="schedule-list"></div>
     <button class="add-card-btn" onclick="addScheduleDay()">+ 날짜 추가</button>
   </div>
@@ -3269,7 +3507,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎡 놀거리 리스트</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎡 놀거리 리스트</div><button class="guide-btn" onclick="openScreenGuide('sub-fun')">❓</button></div>
     <div class="acc-list" id="fun-list"></div>
     <button class="add-card-btn" onclick="playSound('pop');openFunModal()">+ 놀거리 추가하기</button>
   </div>
@@ -3291,7 +3529,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🆚 숙소 비교</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🆚 숙소 비교</div><button class="guide-btn" onclick="openScreenGuide('sub-compare')">❓</button></div>
     <div class="compare-tabs">
       <button class="compare-tab-btn active" data-tab="table" onclick="switchCompareTab('table')">📊 비교표</button>
       <button class="compare-tab-btn" data-tab="worldcup" onclick="switchCompareTab('worldcup')">🏆 이상형 월드컵</button>
@@ -3312,7 +3550,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📝 메모</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">📝 메모</div><button class="guide-btn" onclick="openScreenGuide('sub-memo')">❓</button></div>
     <div class="memo-box"><textarea class="memo-textarea" id="memo-text" placeholder="자유롭게 메모하세요 ✍️" oninput="handleMemoInput()"></textarea></div>
   </div>
 </div>
@@ -3329,7 +3567,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎒 준비물</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🎒 준비물</div><button class="guide-btn" onclick="openScreenGuide('sub-pack')">❓</button></div>
     <div class="checklist" id="pack-list"></div>
     <div class="add-item-row">
       <input type="text" id="pack-input" placeholder="준비물 입력 후 엔터" onkeydown="addPackItem(event)">
@@ -3350,7 +3588,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🚌 교통/동선 요약</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">🚌 교통/동선 요약</div><button class="guide-btn" onclick="openScreenGuide('sub-transport-summary')">❓</button></div>
     <div id="transport-summary-content"></div>
   </div>
 </div>
@@ -3367,7 +3605,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">👗 옷차림 · 컨셉</div></div>
+    <div class="sub-header"><button class="back-btn" onclick="showMain('plan')">← 뒤로</button><div class="sub-page-title">👗 옷차림 · 컨셉</div><button class="guide-btn" onclick="openScreenGuide('sub-outfit')">❓</button></div>
     <div class="outfit-grid">
       <div class="outfit-card" onclick="selectOutfit(this,'casual')"><div class="outfit-emoji">👕</div><div class="outfit-label">캐주얼</div></div>
       <div class="outfit-card" onclick="selectOutfit(this,'chic')"><div class="outfit-emoji">🥻</div><div class="outfit-label">시크&세련</div></div>
@@ -3391,6 +3629,7 @@ function updateAllStatusBadges(){
       <div class="header-project travel" id="travel-header-title">🧳 여행</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <button class="home-btn travel" onclick="goToDashboard()">🏠 홈 화면으로</button>
+        <button class="guide-btn travel" style="margin-left:0;" onclick="openGuideModal()" title="이용방법">📖</button>
         <span class="header-code travel" id="travel-code-badge" onclick="openShareModal()">TRIP-XXXX 📋</span>
         <div class="mode-toggle">
           <button class="mode-btn" onclick="switchMode('plan')">🗓 플래닝</button>
@@ -3450,7 +3689,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📋 플랜 요약</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📋 플랜 요약</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-summary')">❓</button></div>
     <div id="travel-summary-content"></div>
   </div>
 </div>
@@ -3474,7 +3713,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📅 일정 상세 확인</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📅 일정 상세 확인</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-schedule')">❓</button></div>
     <div id="travel-schedule-content"></div>
   </div>
 </div>
@@ -3491,7 +3730,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎲 놀거리 랜덤 뽑기</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎲 놀거리 랜덤 뽑기</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-random')">❓</button></div>
     <div class="random-box">
       <div style="font-size:14px;color:#888;margin-bottom:4px;">오늘 뭐하지? 🤔</div>
       <div class="random-result" id="random-result"><small>버튼을 눌러 뽑아보세요!</small></div>
@@ -3521,7 +3760,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🏨 확정 숙소</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🏨 확정 숙소</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-acc')">❓</button></div>
     <div id="travel-acc-content"></div>
   </div>
 </div>
@@ -3542,7 +3781,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎡 놀거리</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">🎡 놀거리</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-fun')">❓</button></div>
     <div id="travel-fun-content"></div>
   </div>
 </div>
@@ -3559,14 +3798,18 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="backFromReview()">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="backFromReview()">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div><button class="guide-btn travel" onclick="openScreenGuide('sub-travel-review')">❓</button></div>
     <div class="overall-review-section">
       <div class="members-section-title">📝 멤버별 여행 총평</div>
       <div id="overall-review-list"></div>
-      <div class="overall-review-input-row">
+      <div class="overall-review-input-row" id="overall-review-input-row">
         <textarea id="my-overall-review" class="review-field" placeholder="이번 여행은 어땠나요? 한 줄 총평을 남겨보세요 ✍️"></textarea>
-        <button class="save-btn review-save-btn" onclick="saveOverallReview()">총평 등록</button>
+        <div style="display:flex;gap:8px;">
+          <button class="save-btn review-save-btn" id="overall-review-save-btn" style="flex:1;margin:0;" onclick="saveOverallReview()">총평 등록</button>
+          <button class="acc-btn acc-btn-edit review-save-btn" style="flex:0 0 auto;padding:0 16px;" onclick="cancelEditOverallReview()">취소</button>
+        </div>
       </div>
+      <button class="save-btn review-save-btn" id="overall-review-edit-btn" style="display:none;" onclick="startEditOverallReview()">✏️ 총평 수정하기</button>
     </div>
     <button class="btn-main btn-orange" style="width:100%;margin-bottom:16px;" onclick="openReviewModal()">✏️ 리뷰 작성하기</button>
     <div class="review-filter-tabs" id="review-filter-tabs"></div>
@@ -3653,37 +3896,18 @@ function updateAllStatusBadges(){
 </div>
 
 <!-- MODAL: GUIDE -->
+<!-- MODAL: SCREEN GUIDE (화면별 이용방법) -->
+<div class="modal-overlay hidden" id="modal-screen-guide">
+  <div class="modal">
+    <h3><span id="screen-guide-title">이용방법</span> <button class="close-btn" onclick="closeModal('modal-screen-guide')">✕</button></h3>
+    <div id="screen-guide-body"></div>
+  </div>
+</div>
+
 <div class="modal-overlay hidden" id="modal-guide">
   <div class="modal">
     <h3>📖 앱 이용방법 <button class="close-btn" onclick="closeModal('modal-guide')">✕</button></h3>
-    <div class="guide-section">
-      <div class="guide-title">1️⃣ 로그인</div>
-      <div class="guide-body">Google 계정으로 간편하게 로그인할 수 있어요. 처음 로그인하면 닉네임과 프로필 아바타를 설정하는 화면이 나타나요. 6가지 기본 아바타 중 마음에 드는 것을 골라주세요.</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">2️⃣ 새 프로젝트 만들기</div>
-      <div class="guide-body">대시보드에서 <b>✨ 새 프로젝트 만들기</b> 버튼을 누르면 여행 이름, 날짜, 비밀번호(선택)를 입력해서 새로운 여행 플랜을 만들 수 있어요. 생성하면 고유한 초대 코드(예: TRIP-A1B2)가 자동으로 발급돼요.</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">3️⃣ 친구 초대하기</div>
-      <div class="guide-body">여행 화면 상단의 <b>📋 코드</b> 배지를 누르면 공유 창이 열려요. 발급된 코드를 친구에게 알려주면, 친구는 대시보드의 <b>🔑 초대 코드로 참여하기</b>에 코드를 입력해서 같은 프로젝트에 함께 참여할 수 있어요. 실시간으로 모든 변경사항이 동기화돼요!</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">4️⃣ 일정 / 정보 수립하기</div>
-      <div class="guide-body">🗓 플래닝 모드에서는 기본 정보(날짜·장소·구성원·이동수단·테마·예산), 숙소 리스트, 일정, 놀거리, 준비물, 옷차림 등을 함께 채워나가요. 여행이 시작되면 🧳 트레블 모드로 전환해서 확정된 정보와 오늘의 일정을 빠르게 확인할 수 있어요.</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">5️⃣ 대시보드로 돌아가기</div>
-      <div class="guide-body">여행 화면 상단의 <b>🏠 홈 화면으로</b> 버튼을 누르면 언제든지 내 여행 목록이 있는 대시보드로 돌아갈 수 있어요.</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">6️⃣ 프로필 설정 변경하기</div>
-      <div class="guide-body">대시보드 상단의 <b>⚙️ 설정</b> 버튼을 누르면 닉네임, 프로필 아바타, 효과음 on/off, 테마를 언제든지 자유롭게 수정할 수 있어요.</div>
-    </div>
-    <div class="guide-section">
-      <div class="guide-title">7️⃣ 방장 권한 &amp; 참여자 목록</div>
-      <div class="guide-body">프로젝트를 처음 만든 사람은 <b>방장(👑)</b>이 돼요. 방 안에는 현재 참여 중인 멤버들의 닉네임과 아바타가 표시되고, 초록불은 온라인, 회색불은 오프라인 상태예요. 방장 화면에는 <b>🗑️ 프로젝트 삭제</b> 버튼이 추가로 보이며, 누르면 해당 프로젝트가 영구적으로 삭제돼요.</div>
-    </div>
+    <div id="modal-guide-body"></div>
   </div>
 </div>
 
