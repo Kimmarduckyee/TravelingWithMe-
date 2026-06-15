@@ -108,6 +108,7 @@ function sanitizeProject(p) {
       return m;
     }));
   }
+  p.overallReviews = (p.overallReviews && typeof p.overallReviews==='object' && !Array.isArray(p.overallReviews)) ? p.overallReviews : {};
   return p;
 }
 
@@ -119,7 +120,7 @@ const SECTION_LABELS = {
   password:'비밀번호', hostUid:'방장 정보',
   accommodations:'숙소 리스트', funList:'놀거리', schedule:'일정', memo:'메모',
   packList:'준비물', outfit:'옷차림', outfitMemo:'옷차림',
-  worldcup:'이상형 월드컵', reviews:'리뷰', archived:'여행 상태', archivedAt:'여행 상태'
+  worldcup:'이상형 월드컵', reviews:'리뷰', overallReviews:'멤버 총평', archived:'여행 상태', archivedAt:'여행 상태'
 };
 function getChangedSections(oldP, newP) {
   if(!oldP || !newP) return [];
@@ -437,6 +438,7 @@ window.openPastProject = async function(code) {
     projectCode = code;
     attachListener(code);
     enterProject();
+    showSub('sub-travel-review');
     showToast('📦 지난 여행 보기 모드예요 (읽기 전용)');
     playSound('pop');
   } catch(e) { showToast('⚠️ 오류: ' + e.message); }
@@ -1731,23 +1733,99 @@ function renderTravelFun(){
 // ══ 리뷰 (인스타 감성) ══
 let reviewRating = 0;
 let reviewTempPhotos = [];
-function getReviewTargets(){
-  const targets = [{type:'general', label:'✨ 전체 여행 / 기타'}];
-  (project.accommodations||[]).forEach(a => targets.push({type:'acc', label:'🏨 '+a.name}));
-  (project.funList||[]).forEach(f => targets.push({type:'fun', label:'🎡 '+f.name}));
-  (project.schedule||[]).forEach(d => (d.items||[]).forEach(it => targets.push({type:'schedule', label:`📅 ${d.label} - ${it.text}`})));
-  return targets;
+let selectedReviewCategory = 'general';
+let selectedReviewWeather = '';
+let selectedReviewMood = '';
+let reviewFilter = 'all';
+
+const REVIEW_CATEGORIES = [
+  {type:'general', label:'✨ 전체여행'},
+  {type:'acc', label:'🏨 숙소'},
+  {type:'fun', label:'🎡 놀거리'},
+  {type:'schedule', label:'📅 일정'},
+  {type:'food', label:'🍜 먹거리'},
+  {type:'place', label:'📍 발견한 장소'},
+  {type:'memory', label:'💭 추억'}
+];
+const REVIEW_CATEGORY_PREFIX = {acc:'🏨 ', fun:'🎡 ', schedule:'📅 ', food:'🍜 ', place:'📍 ', memory:'💭 '};
+const WEATHER_OPTIONS = [
+  {key:'', label:'선택안함'}, {key:'sunny', label:'☀️ 맑음'}, {key:'cloudy', label:'☁️ 흐림'},
+  {key:'rainy', label:'🌧️ 비'}, {key:'snowy', label:'❄️ 눈'}, {key:'windy', label:'💨 바람'},
+  {key:'hot', label:'🥵 더움'}, {key:'cold', label:'🥶 추움'}
+];
+const MOOD_OPTIONS = [
+  {key:'', label:'선택안함'}, {key:'happy', label:'😊 행복'}, {key:'excited', label:'🤩 신남'},
+  {key:'relaxed', label:'😌 여유'}, {key:'tired', label:'😴 피곤'}, {key:'sad', label:'😢 슬픔'},
+  {key:'love', label:'🥰 사랑'}, {key:'angry', label:'😡 화남'}
+];
+function getReviewTargetItems(type){
+  if(type==='acc') return (project.accommodations||[]).map(a=>'🏨 '+a.name);
+  if(type==='fun') return (project.funList||[]).map(f=>'🎡 '+f.name);
+  if(type==='schedule'){
+    const out=[];
+    (project.schedule||[]).forEach(d=>(d.items||[]).forEach(it=>out.push(`📅 ${d.label} - ${it.text}`)));
+    return out;
+  }
+  return [];
+}
+function updateReviewTargetUI(type){
+  const group = document.getElementById('review-target-group');
+  const select = document.getElementById('review-target-select');
+  const custom = document.getElementById('review-target-custom');
+  if(type==='general'){ group.style.display='none'; return; }
+  group.style.display='';
+  const placeholders = {acc:'숙소 이름을 직접 입력', fun:'놀거리 이름을 직접 입력', schedule:'일정 내용을 직접 입력', food:'예: 강릉 짬뽕순두부', place:'예: 숨겨진 전망대', memory:'예: 다같이 본 노을'};
+  if(type==='acc'||type==='fun'||type==='schedule'){
+    const items = getReviewTargetItems(type);
+    if(items.length){
+      select.style.display=''; custom.style.display='none';
+      select.innerHTML = items.map(l=>`<option value="${escapeHtml(l)}">${l}</option>`).join('');
+      return;
+    }
+  }
+  select.style.display='none'; custom.style.display='';
+  custom.placeholder = placeholders[type] || '이름을 입력해주세요';
+}
+window.selectReviewCategory = function(type){
+  selectedReviewCategory = type;
+  renderReviewCategoryGrid();
+  updateReviewTargetUI(type);
+  playSound('click');
+}
+window.selectReviewWeather = function(key){ selectedReviewWeather=key; renderReviewWeatherGrid(); playSound('click'); }
+window.selectReviewMood = function(key){ selectedReviewMood=key; renderReviewMoodGrid(); playSound('click'); }
+function renderReviewCategoryGrid(){
+  document.getElementById('review-category-grid').innerHTML = REVIEW_CATEGORIES.map(c=>
+    `<button type="button" class="pick-btn ${c.type===selectedReviewCategory?'selected':''}" onclick="selectReviewCategory('${c.type}')">${c.label}</button>`
+  ).join('');
+}
+function renderReviewWeatherGrid(){
+  document.getElementById('review-weather-grid').innerHTML = WEATHER_OPTIONS.map(o=>
+    `<button type="button" class="pick-btn ${o.key===selectedReviewWeather?'selected':''}" onclick="selectReviewWeather('${o.key}')">${o.label}</button>`
+  ).join('');
+}
+function renderReviewMoodGrid(){
+  document.getElementById('review-mood-grid').innerHTML = MOOD_OPTIONS.map(o=>
+    `<button type="button" class="pick-btn ${o.key===selectedReviewMood?'selected':''}" onclick="selectReviewMood('${o.key}')">${o.label}</button>`
+  ).join('');
 }
 window.openReviewModal = function(){
-  if(isProjectReadOnly()) return;
   reviewRating = 0;
   reviewTempPhotos = [];
+  selectedReviewCategory = 'general';
+  selectedReviewWeather = '';
+  selectedReviewMood = '';
   renderReviewStars();
+  renderReviewCategoryGrid();
+  renderReviewWeatherGrid();
+  renderReviewMoodGrid();
+  updateReviewTargetUI('general');
   document.getElementById('review-photo-list').innerHTML='';
   setText('review-photo-status','');
   setValue('review-text','');
-  const targets = getReviewTargets();
-  document.getElementById('review-target').innerHTML = targets.map(t=>`<option value="${escapeHtml(t.label)}">${t.label}</option>`).join('');
+  setValue('review-location','');
+  setValue('review-time','');
+  document.getElementById('review-target-custom').value='';
   setupImgurFileInput('review-photo-file','review-photo-status',(url)=>{
     if(reviewTempPhotos.length>=6){ showToast('사진은 최대 6개!'); return; }
     reviewTempPhotos.push(url); renderReviewPhotoList();
@@ -1775,15 +1853,30 @@ function renderReviewPhotoList(){
 }
 window.removeReviewPhoto = function(i){ reviewTempPhotos.splice(i,1); renderReviewPhotoList(); }
 window.saveReview = async function(){
-  if(isProjectReadOnly()) return;
   if(!reviewRating){ showToast('별점을 선택해주세요! ⭐'); return; }
   const text = document.getElementById('review-text').value.trim();
   if(!text){ showToast('리뷰 내용을 입력해주세요!'); return; }
-  const targetLabel = document.getElementById('review-target').value;
+  let targetLabel;
+  if(selectedReviewCategory==='general'){
+    targetLabel = '✨ 전체 여행';
+  } else {
+    const select = document.getElementById('review-target-select');
+    const custom = document.getElementById('review-target-custom');
+    if(select.style.display!=='none' && select.value){
+      targetLabel = select.value;
+    } else {
+      const v = custom.value.trim();
+      if(!v){ showToast('항목 이름을 입력해주세요!'); return; }
+      targetLabel = (REVIEW_CATEGORY_PREFIX[selectedReviewCategory]||'')+v;
+    }
+  }
+  const location = document.getElementById('review-location').value.trim();
+  const time = document.getElementById('review-time').value;
   if(!project.reviews) project.reviews=[];
   const review = {
     id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
-    targetLabel, rating: reviewRating, text, photos:[...reviewTempPhotos],
+    targetType: selectedReviewCategory, targetLabel, rating: reviewRating, text, photos:[...reviewTempPhotos],
+    location, time, weather: selectedReviewWeather, mood: selectedReviewMood,
     authorUid: currentUser?currentUser.uid:'', authorName: (userProfile&&userProfile.nickname)||'여행자',
     authorPhoto: (userProfile&&userProfile.photo)||AVATAR_LIST[0],
     ts: Date.now(), comments: []
@@ -1796,7 +1889,6 @@ window.saveReview = async function(){
   showToast('✅ 리뷰가 등록되었어요!');
 }
 window.deleteReview = async function(id){
-  if(isProjectReadOnly()) return;
   const idx = (project.reviews||[]).findIndex(r=>r.id===id);
   if(idx<0) return;
   const r = project.reviews[idx];
@@ -1809,7 +1901,7 @@ window.deleteReview = async function(id){
   showToast('🗑️ 리뷰를 삭제했어요');
 }
 window.addReviewComment = async function(id){
-  if(isProjectReadOnly() || !currentUser) return;
+  if(!currentUser) return;
   const input = document.getElementById('review-comment-'+id);
   if(!input) return;
   const text = input.value.trim(); if(!text) return;
@@ -1825,16 +1917,42 @@ window.addReviewComment = async function(id){
   await saveProject();
   renderReviewFeed();
 }
+window.setReviewFilter = function(t){
+  reviewFilter = t;
+  renderReviewFilterTabs();
+  renderReviewFeed();
+  playSound('click');
+}
+function renderReviewFilterTabs(){
+  const el = document.getElementById('review-filter-tabs');
+  if(!el) return;
+  const tabs = [{type:'all',label:'전체'}, ...REVIEW_CATEGORIES];
+  el.innerHTML = tabs.map(t=>
+    `<button class="review-filter-btn ${t.type===reviewFilter?'active':''}" onclick="setReviewFilter('${t.type}')">${t.label}</button>`
+  ).join('');
+}
+function reviewWeatherMoodBadges(r){
+  const badges = [];
+  if(r.location) badges.push(`📍 ${escapeHtml(r.location)}`);
+  if(r.time) badges.push(`🕐 ${escapeHtml(r.time)}`);
+  if(r.weather){ const w=WEATHER_OPTIONS.find(o=>o.key===r.weather); if(w&&w.key) badges.push(w.label); }
+  if(r.mood){ const m=MOOD_OPTIONS.find(o=>o.key===r.mood); if(m&&m.key) badges.push(m.label); }
+  return badges;
+}
 function renderReviewFeed(){
   const el = document.getElementById('review-feed');
   if(!el) return;
-  const reviews = project.reviews||[];
+  renderReviewFilterTabs();
+  renderOverallReviews();
+  const all = project.reviews||[];
+  const reviews = all.filter(r => reviewFilter==='all' || (r.targetType||'general')===reviewFilter);
   if(!reviews.length){
-    el.innerHTML = '<div class="empty-hint">아직 리뷰가 없어요! 📸<br>여행 중 추억과 평가를 남겨보세요</div>';
+    el.innerHTML = `<div class="empty-hint">${all.length?'이 카테고리에는 리뷰가 없어요 🤔':'아직 리뷰가 없어요! 📸<br>여행 중 추억과 평가를 남겨보세요'}</div>`;
     return;
   }
-  el.innerHTML = reviews.map(r=>`
-    <div class="review-card">
+  el.innerHTML = reviews.map(r=>{
+    const badges = reviewWeatherMoodBadges(r);
+    return `<div class="review-card">
       <div class="review-header">
         <img class="review-avatar" src="${getPhotoUrl(r.authorPhoto)}" onerror="this.style.display='none'">
         <div class="review-header-info">
@@ -1843,6 +1961,7 @@ function renderReviewFeed(){
         </div>
         <div class="review-stars-display">${'⭐'.repeat(r.rating)}</div>
       </div>
+      ${badges.length?`<div class="review-badges">${badges.map(b=>`<span class="review-badge">${b}</span>`).join('')}</div>`:''}
       ${(r.photos&&r.photos.length)?`<div class="review-photos">${r.photos.map(p=>`<div class="review-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
       <div class="review-text">${escapeHtml(r.text)}</div>
       <div class="review-time">${new Date(r.ts).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
@@ -1859,7 +1978,48 @@ function renderReviewFeed(){
         <button onclick="addReviewComment('${r.id}')">등록</button>
       </div>
       ${(currentUser && (r.authorUid===currentUser.uid || (project && project.hostUid===currentUser.uid)))?`<button class="review-delete-btn" onclick="deleteReview('${r.id}')">🗑️ 삭제</button>`:''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+// ══ 멤버별 여행 총평 ══
+function renderOverallReviews(){
+  const list = document.getElementById('overall-review-list');
+  if(!list) return;
+  const overall = project.overallReviews||{};
+  const entries = Object.entries(overall);
+  if(!entries.length){
+    list.innerHTML = '<div class="empty-hint" style="padding:14px;">아직 작성된 총평이 없어요. 여행은 어떠셨나요? 😊</div>';
+  } else {
+    list.innerHTML = entries.map(([uid,o])=>`
+      <div class="overall-review-card">
+        <img class="review-avatar" src="${getPhotoUrl(o.photo)}" onerror="this.style.display='none'">
+        <div class="overall-review-body">
+          <div class="review-author">${escapeHtml(o.nickname)}${project.hostUid===uid?' <span class="host-badge">(방장)</span>':''}</div>
+          <div class="review-text">${escapeHtml(o.text)}</div>
+        </div>
+      </div>`).join('');
+  }
+  const input = document.getElementById('my-overall-review');
+  if(input && document.activeElement !== input){
+    const mine = currentUser && overall[currentUser.uid];
+    input.value = mine ? mine.text : '';
+  }
+}
+window.saveOverallReview = async function(){
+  if(!currentUser){ showToast('로그인이 필요해요'); return; }
+  const text = document.getElementById('my-overall-review').value.trim();
+  if(!text){ showToast('총평을 입력해주세요!'); return; }
+  if(!project.overallReviews) project.overallReviews={};
+  project.overallReviews[currentUser.uid] = {
+    nickname: (userProfile&&userProfile.nickname)||'여행자',
+    photo: (userProfile&&userProfile.photo)||AVATAR_LIST[0],
+    text, ts: Date.now()
+  };
+  playSound('save');
+  await saveProject();
+  renderOverallReviews();
+  showToast('✅ 총평이 등록되었어요!');
 }
 
 // ══ SHARE ══
@@ -2128,6 +2288,29 @@ function updateAllStatusBadges(){
   .review-comment-input-row button{padding:8px 14px;background:#FF8C42;color:#fff;border:none;border-radius:50px;font-size:12px;font-weight:700;cursor:pointer;}
   .review-delete-btn{margin-top:10px;background:none;border:none;color:#ddd;font-size:11px;cursor:pointer;}
   .review-delete-btn:hover{color:#e74c3c;}
+  .review-badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;}
+  .review-badge{background:#FFF8F2;border:1px solid #FFE0C8;border-radius:50px;padding:3px 10px;font-size:11px;color:#888;}
+
+  /* 리뷰 필터 탭 */
+  .review-filter-tabs{display:flex;gap:6px;overflow-x:auto;margin-bottom:14px;padding-bottom:4px;}
+  .review-filter-btn{flex-shrink:0;padding:8px 14px;border:2px solid #FFE0C8;background:#fff;border-radius:50px;font-size:12px;font-weight:700;color:#aaa;cursor:pointer;white-space:nowrap;transition:all .15s;}
+  .review-filter-btn.active{background:#FF8C42;color:#fff;border-color:#FF8C42;}
+
+  /* 카테고리/날씨/기분 선택 그리드 */
+  .pick-grid{display:flex;flex-wrap:wrap;gap:8px;}
+  .pick-btn{padding:8px 14px;border:2px solid #FFE0C8;background:#fff;border-radius:50px;font-size:12px;font-weight:600;color:#888;cursor:pointer;transition:all .15s;}
+  .pick-btn.selected{background:#FF8C42;color:#fff;border-color:#FF8C42;}
+  .form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+
+  /* 멤버별 총평 */
+  .overall-review-section{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:16px;}
+  .overall-review-card{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid #FFF3E8;}
+  .overall-review-card:last-child{border-bottom:none;}
+  .overall-review-body{flex:1;min-width:0;}
+  .overall-review-input-row{margin-top:10px;display:flex;flex-direction:column;gap:8px;}
+  .overall-review-input-row textarea{width:100%;min-height:60px;border:2px solid #FFE0C8;border-radius:12px;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical;outline:none;}
+  .overall-review-input-row textarea:focus{border-color:#FF8C42;}
+  .overall-review-input-row .save-btn{margin:0;}
 
   /* OUTFIT */
   .outfit-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
@@ -2398,6 +2581,12 @@ function updateAllStatusBadges(){
   [data-theme="dark"] .review-comment-input-row{border-top-color:rgba(155,77,255,.2);}
   [data-theme="dark"] .review-comment-input-row input{background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);}
   [data-theme="dark"] .review-comment-input-row button{background:linear-gradient(135deg,#7b2ff7,#a855f7);}
+  [data-theme="dark"] .review-badge{background:rgba(155,77,255,.12);border-color:rgba(155,77,255,.3);color:#c9a8ff;}
+  [data-theme="dark"] .review-filter-btn,[data-theme="dark"] .pick-btn{background:rgba(255,255,255,.06);border-color:rgba(155,77,255,.35);color:#b8a8d8;}
+  [data-theme="dark"] .review-filter-btn.active,[data-theme="dark"] .pick-btn.selected{background:#7b2ff7;color:#fff;border-color:#7b2ff7;}
+  [data-theme="dark"] .overall-review-section{background:rgba(35,25,60,.78);box-shadow:0 4px 20px rgba(0,0,0,.4);}
+  [data-theme="dark"] .overall-review-card{border-bottom-color:rgba(155,77,255,.15);}
+  [data-theme="dark"] .overall-review-input-row textarea{background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);}
 
   /* ══════════ BLUE SUMMER THEME ══════════ */
   [data-theme="summer"] body,[data-theme="summer"] body.travel-mode{background:transparent;}
@@ -2429,6 +2618,8 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .review-card{background:rgba(255,255,255,.8);}
   [data-theme="summer"] .review-author{color:#2E7FD9;}
   [data-theme="summer"] .review-comment-input-row button{background:linear-gradient(135deg,#4A90D9,#FF8FC1);}
+  [data-theme="summer"] .review-filter-btn.active,[data-theme="summer"] .pick-btn.selected{background:#4A90D9;border-color:#4A90D9;}
+  [data-theme="summer"] .overall-review-section{background:rgba(255,255,255,.8);}
 </style>
 </head>
 <body>
@@ -2647,13 +2838,13 @@ function updateAllStatusBadges(){
     <div class="section-title">🌟 플래닝 메뉴</div>
     <div class="card-grid">
       <div class="menu-card" onclick="playSound('pop');showSub('sub-info')"><div class="card-icon">📋</div><div class="card-label">기본 정보</div><div class="card-status" id="status-info">미입력</div></div>
-      <div class="menu-card" onclick="playSound('pop');showSub('sub-acc')"><div class="card-icon">🏨</div><div class="card-label">숙소 리스트</div><div class="card-status" id="status-acc">0개</div></div>
-      <div class="menu-card" onclick="playSound('pop');showSub('sub-schedule')"><div class="card-icon">📅</div><div class="card-label">일정 입력</div><div class="card-status" id="status-schedule">선택사항</div></div>
-      <div class="menu-card" onclick="playSound('pop');showSub('sub-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div><div class="card-status" id="status-fun">0개</div></div>
-      <div class="menu-card" onclick="playSound('pop');showSub('sub-compare')"><div class="card-icon">🆚</div><div class="card-label">숙소 비교</div><div class="card-status">비교하기</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div><div class="card-status" id="status-memo">비어있음</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-schedule')"><div class="card-icon">📅</div><div class="card-label">일정 입력</div><div class="card-status" id="status-schedule">선택사항</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물</div><div class="card-status" id="status-pack">0개</div></div>
       <div class="menu-card" onclick="playSound('pop');showSub('sub-outfit')"><div class="card-icon">👗</div><div class="card-label">옷차림·컨셉</div><div class="card-status" id="status-outfit">미정</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-acc')"><div class="card-icon">🏨</div><div class="card-label">숙소 리스트</div><div class="card-status" id="status-acc">0개</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-compare')"><div class="card-icon">🆚</div><div class="card-label">숙소 비교</div><div class="card-status">비교하기</div></div>
+      <div class="menu-card" onclick="playSound('pop');showSub('sub-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div><div class="card-status" id="status-fun">0개</div></div>
     </div>
     <button class="danger-btn host-only-delete" style="display:none;" onclick="openDeleteConfirm()">🗑️ 프로젝트 삭제하기 (방장 전용)</button>
   </div>
@@ -2909,13 +3100,13 @@ function updateAllStatusBadges(){
     <div class="section-title">🧳 트레블 메뉴</div>
     <div class="card-grid">
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-summary')"><div class="card-icon">📋</div><div class="card-label">플랜 요약</div></div>
-      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-schedule')"><div class="card-icon">📅</div><div class="card-label">오늘 일정</div></div>
-      <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
-      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
-      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
-      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-review')"><div class="card-icon">📸</div><div class="card-label">여행 리뷰</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-schedule')"><div class="card-icon">📅</div><div class="card-label">오늘 일정</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물 체크</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-review')"><div class="card-icon">📸</div><div class="card-label">여행 리뷰</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
+      <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
+      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
     </div>
     <button class="end-trip-btn host-only-end" style="display:none;" onclick="openEndTripConfirm()">🏁 여행 끝내기 (방장 전용)</button>
   </div>
@@ -3054,8 +3245,18 @@ function updateAllStatusBadges(){
   </div>
   <div class="main-content">
     <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div></div>
+    <div class="overall-review-section">
+      <div class="members-section-title">📝 멤버별 여행 총평</div>
+      <div id="overall-review-list"></div>
+      <div class="overall-review-input-row">
+        <textarea id="my-overall-review" class="review-field" placeholder="이번 여행은 어땠나요? 한 줄 총평을 남겨보세요 ✍️"></textarea>
+        <button class="save-btn review-save-btn" onclick="saveOverallReview()">총평 등록</button>
+      </div>
+    </div>
     <button class="btn-main btn-orange" style="width:100%;margin-bottom:16px;" onclick="openReviewModal()">✏️ 리뷰 작성하기</button>
+    <div class="review-filter-tabs" id="review-filter-tabs"></div>
     <div id="review-feed"></div>
+    <button class="btn-main btn-outline" style="width:100%;margin-top:20px;" onclick="playSound('pop');showMain('travel')">🔍 프로젝트 상세 보기 (플래닝/트레블 메뉴)</button>
   </div>
 </div>
 
@@ -3220,12 +3421,29 @@ function updateAllStatusBadges(){
   <div class="modal">
     <h3>📸 리뷰 작성 <button class="close-btn" onclick="closeModal('modal-review')">✕</button></h3>
     <div class="form-group">
+      <label>카테고리</label>
+      <div class="pick-grid" id="review-category-grid"></div>
+    </div>
+    <div class="form-group" id="review-target-group">
       <label>무엇에 대한 리뷰인가요?</label>
-      <select id="review-target" class="review-field"></select>
+      <select id="review-target-select" class="review-field"></select>
+      <input type="text" id="review-target-custom" class="review-field" placeholder="이름을 입력해주세요">
     </div>
     <div class="form-group">
       <label>별점</label>
       <div class="star-picker" id="review-stars"></div>
+    </div>
+    <div class="form-row-2">
+      <div class="form-group"><label>📍 위치</label><input type="text" id="review-location" class="review-field" placeholder="예: 강남역"></div>
+      <div class="form-group"><label>🕐 시간</label><input type="time" id="review-time" class="review-field"></div>
+    </div>
+    <div class="form-group">
+      <label>☁️ 그날의 날씨</label>
+      <div class="pick-grid" id="review-weather-grid"></div>
+    </div>
+    <div class="form-group">
+      <label>😊 그때의 기분</label>
+      <div class="pick-grid" id="review-mood-grid"></div>
     </div>
     <div class="form-group">
       <label>리뷰 내용</label>
