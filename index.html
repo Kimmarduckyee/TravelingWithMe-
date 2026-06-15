@@ -850,39 +850,56 @@ window.closeImageView = function() {
   if(img) img.src = '';
 }
 
-// ══ IMGUR UPLOAD ══
-// 발급: https://api.imgur.com/oauth2/addclient (등록 후 "Anonymous usage without user authorization" 선택)
-// 발급받은 Client-ID를 아래에 넣어주세요.
-const IMGUR_CLIENT_ID = '7e7f6e077d853e3';
-async function uploadToImgur(file) {
-  if(!file) throw new Error('파일이 없어요');
-  if(!file.type.startsWith('image/')) throw new Error('이미지 파일만 업로드할 수 있어요');
-  if(IMGUR_CLIENT_ID === 'YOUR_IMGUR_CLIENT_ID') throw new Error('Imgur Client-ID가 설정되지 않았어요 (코드 상단 IMGUR_CLIENT_ID 확인)');
-  const form = new FormData();
-  form.append('image', file);
-  const res = await fetch('https://api.imgur.com/3/image', {
-    method: 'POST',
-    headers: { 'Authorization': 'Client-ID ' + IMGUR_CLIENT_ID },
-    body: form
+// ══ 이미지 업로드 (Base64, 자동 리사이즈/압축) ══
+// 외부 서비스(Imgur 등) 없이, 이미지를 브라우저에서 리사이즈/압축한 뒤
+// Base64 데이터 URL로 변환해 Firebase에 직접 저장해요.
+// ⚠️ 사진이 많아질수록 프로젝트 데이터가 커져서 로딩이 느려질 수 있으니,
+// 한 항목당 사진은 너무 많이 등록하지 않는 걸 추천해요.
+const IMAGE_MAX_DIMENSION = 1280; // 가로/세로 최대 길이(px)
+const IMAGE_JPEG_QUALITY = 0.7;   // JPEG 압축 품질 (0~1)
+function fileToCompressedDataURL(file) {
+  return new Promise((resolve, reject) => {
+    if(!file) { reject(new Error('파일이 없어요')); return; }
+    if(!file.type.startsWith('image/')) { reject(new Error('이미지 파일만 업로드할 수 있어요')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('파일을 읽을 수 없어요'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('이미지를 불러올 수 없어요'));
+      img.onload = () => {
+        let { width, height } = img;
+        if(width > IMAGE_MAX_DIMENSION || height > IMAGE_MAX_DIMENSION) {
+          if(width > height) { height = Math.round(height * IMAGE_MAX_DIMENSION / width); width = IMAGE_MAX_DIMENSION; }
+          else { width = Math.round(width * IMAGE_MAX_DIMENSION / height); height = IMAGE_MAX_DIMENSION; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        try {
+          resolve(canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY));
+        } catch(e) { reject(new Error('이미지 변환에 실패했어요')); }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
   });
-  const data = await res.json();
-  if(!res.ok || !data.success) throw new Error((data.data && data.data.error) || '업로드 실패');
-  return data.data.link;
 }
-// Wires a hidden file input to upload to Imgur, then runs onDone(url) with
-// the resulting image URL. statusElId (optional) shows "업로드 중..." text.
-function setupImgurFileInput(inputId, statusElId, onDone) {
+// Wires a hidden file input to convert the chosen image to a compressed
+// Base64 data URL, then runs onDone(dataUrl). statusElId (optional) shows
+// "처리 중..." text while converting.
+function setupImageFileInput(inputId, statusElId, onDone) {
   const input = document.getElementById(inputId);
   if(!input) return;
   input.onchange = async (e) => {
     const file = e.target.files && e.target.files[0];
     if(!file) return;
     const statusEl = statusElId ? document.getElementById(statusElId) : null;
-    if(statusEl) statusEl.textContent = '📤 업로드 중...';
+    if(statusEl) statusEl.textContent = '📤 처리 중...';
     try {
-      const url = await uploadToImgur(file);
+      const dataUrl = await fileToCompressedDataURL(file);
       if(statusEl) statusEl.textContent = '';
-      onDone(url);
+      onDone(dataUrl);
     } catch(err) {
       if(statusEl) statusEl.textContent = '';
       showToast('⚠️ ' + err.message);
@@ -899,7 +916,7 @@ let kakaoMapsLoaded = false;
 let kakaoMapsLoading = null;
 function loadKakaoMaps() {
   if(kakaoMapsLoaded) return Promise.resolve();
- if(KAKAO_MAP_API_KEY === 'YOUR_KAKAO_MAP_API_KEY') {
+  if(KAKAO_MAP_API_KEY === 'YOUR_KAKAO_MAP_API_KEY') {
     return Promise.reject(new Error('Kakao Maps API 키가 설정되지 않았어요 (코드 상단 KAKAO_MAP_API_KEY 확인)'));
   }
   if(kakaoMapsLoading) return kakaoMapsLoading;
@@ -1266,7 +1283,7 @@ window.openAccModal = function(idx) {
     accTempNotes=[...a.notes]; accTempPhotos=[...(a.photos||[])];
     renderAccNoteTags(); renderAccPhotoList();
   }
-  setupImgurFileInput('acc-photo-file', 'acc-photo-status', (url) => {
+  setupImageFileInput('acc-photo-file', 'acc-photo-status', (url) => {
     if(accTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
     accTempPhotos.push(url); renderAccPhotoList();
     showToast('✅ 사진 업로드 완료!');
@@ -1363,7 +1380,7 @@ window.openFunModal=function(idx){
     setValue('fun-name',f.name); setValue('fun-link',f.link||''); setValue('fun-memo',f.memo||'');
     funTempPhotos=[...(f.photos||[])]; renderFunPhotoList();
   }
-  setupImgurFileInput('fun-photo-file', 'fun-photo-status', (url) => {
+  setupImageFileInput('fun-photo-file', 'fun-photo-status', (url) => {
     if(funTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
     funTempPhotos.push(url); renderFunPhotoList();
     showToast('✅ 사진 업로드 완료!');
@@ -1425,13 +1442,22 @@ function addDays(dateStr,days){ const d=new Date(dateStr); d.setDate(d.getDate()
 
 // per-day "일정/교통수단" add-tab state (default: 일정)
 let scheduleAddTab = {};
+// 교통수단 항목의 "다음 일정" 위치 정보를 찾아 카카오맵 길찾기 링크에 사용
+function findAdjacentLocation(items, ii, dir){
+  for(let j=ii+dir; dir>0 ? j<items.length : j>=0; j+=dir){
+    if(items[j].type!=='transport') return items[j].location || null;
+  }
+  return null;
+}
 function renderScheduleItemRow(item, di, ii, showDelete=true){
   const delBtn = showDelete?`<button style="background:none;border:none;color:#ddd;cursor:pointer;" onclick="deleteSchedItem(${di},${ii})">×</button>`:'';
   if(item.type==='transport'){
     const m = TRANSPORT_MODES[item.mode]||TRANSPORT_MODES.car;
+    const toLoc = findAdjacentLocation(project.schedule[di].items, ii, 1);
+    const routeLink = toLoc?` <a class="schedule-location-tag" href="${kakaoMapLink(toLoc)}" target="_blank" onclick="event.stopPropagation()">🗺️ 길찾기</a>`:'';
     return `<div class="schedule-item schedule-item-transport">
       <span class="schedule-time">${escapeHtml(item.time||'')}</span>
-      <span class="schedule-text">${m.icon} ${m.label}${item.detail?' · '+escapeHtml(item.detail):''}</span>
+      <span class="schedule-text">${m.icon} ${m.label}${item.detail?' · '+escapeHtml(item.detail):''}${routeLink}</span>
       ${delBtn}
     </div>`;
   }
@@ -1605,7 +1631,8 @@ function getTransportSummary(){
       let from=null, to=null;
       for(let j=ii-1;j>=0;j--){ if(items[j].type!=='transport'){ from=items[j].text; break; } }
       for(let j=ii+1;j<items.length;j++){ if(items[j].type!=='transport'){ to=items[j].text; break; } }
-      out.push({dayLabel:day.label, time:item.time, mode:item.mode, detail:item.detail, from, to});
+      const toLocation = findAdjacentLocation(items, ii, 1);
+      out.push({dayLabel:day.label, time:item.time, mode:item.mode, detail:item.detail, from, to, toLocation});
     });
   });
   return out;
@@ -1625,11 +1652,12 @@ function renderTransportSummary(elId){
       <div class="transport-day-title">📅 ${escapeHtml(dayLabel)}</div>
       ${items.map(t => {
         const m = TRANSPORT_MODES[t.mode]||TRANSPORT_MODES.car;
+        const routeLink = t.toLocation?` · <a class="schedule-location-tag" href="${kakaoMapLink(t.toLocation)}" target="_blank">🗺️ 길찾기</a>`:'';
         return `<div class="transport-summary-item">
           <div class="transport-summary-icon">${m.icon}</div>
           <div class="transport-summary-body">
             <div class="transport-summary-route">${t.from?escapeHtml(t.from):'?'} → ${t.to?escapeHtml(t.to):'?'}</div>
-            <div class="transport-summary-detail">${m.label}${t.detail?' · '+escapeHtml(t.detail):''} · ${escapeHtml(t.time||'')}</div>
+            <div class="transport-summary-detail">${m.label}${t.detail?' · '+escapeHtml(t.detail):''} · ${escapeHtml(t.time||'')}${routeLink}</div>
           </div>
         </div>`;
       }).join('')}
@@ -2028,7 +2056,7 @@ window.openReviewModal = function(){
   setValue('review-location','');
   setValue('review-time','');
   document.getElementById('review-target-custom').value='';
-  setupImgurFileInput('review-photo-file','review-photo-status',(url)=>{
+  setupImageFileInput('review-photo-file','review-photo-status',(url)=>{
     if(reviewTempPhotos.length>=6){ showToast('사진은 최대 6개!'); return; }
     reviewTempPhotos.push(url); renderReviewPhotoList();
     showToast('✅ 사진 업로드 완료!');
@@ -2275,6 +2303,7 @@ function updateAllStatusBadges(){
 <style>
   :root{--plan-primary:#FF8C42;--travel-primary:#4A90D9;--radius:20px;--radius-sm:12px;--shadow:0 4px 20px rgba(0,0,0,.08);--shadow-card:0 2px 12px rgba(0,0,0,.06);}
   *{box-sizing:border-box;margin:0;padding:0;}
+  input,select,textarea{min-width:0;}
   body{font-family:'Segoe UI','Apple SD Gothic Neo',sans-serif;background:#FFF8F2;min-height:100vh;}
   body.travel-mode{background:#F0F6FF;}
   .screen{display:none;min-height:100vh;}
