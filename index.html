@@ -575,6 +575,15 @@ function updateReadOnlyUI() {
   const ro = !!(project && project.archived);
   document.body.classList.toggle('readonly-mode', ro);
   document.querySelectorAll('.archived-banner').forEach(el => el.style.display = ro ? '' : 'none');
+  document.querySelectorAll('.detail-view-btn').forEach(el => el.style.display = ro ? '' : 'none');
+}
+
+// Back button on the 여행 리뷰 screen: for archived ("지난 여행") projects this
+// screen is the entry point, so "뒤로" returns to the dashboard. For active
+// trips it's a normal travel-menu sub-screen, so "뒤로" returns to travel-main.
+window.backFromReview = function() {
+  if(project && project.archived) goToDashboard();
+  else showMain('travel');
 }
 
 // ══ HOST AUTO-CLAIM (for projects created before host system) ══
@@ -1739,7 +1748,7 @@ let selectedReviewMood = '';
 let reviewFilter = 'all';
 
 const REVIEW_CATEGORIES = [
-  {type:'general', label:'✨ 전체여행'},
+  {type:'general', label:'✨ 기타'},
   {type:'acc', label:'🏨 숙소'},
   {type:'fun', label:'🎡 놀거리'},
   {type:'schedule', label:'📅 일정'},
@@ -1858,7 +1867,7 @@ window.saveReview = async function(){
   if(!text){ showToast('리뷰 내용을 입력해주세요!'); return; }
   let targetLabel;
   if(selectedReviewCategory==='general'){
-    targetLabel = '✨ 전체 여행';
+    targetLabel = '✨ 기타';
   } else {
     const select = document.getElementById('review-target-select');
     const custom = document.getElementById('review-target-custom');
@@ -2402,6 +2411,10 @@ function updateAllStatusBadges(){
   .invite-banner-btn.travel{background:linear-gradient(135deg,#4A90D9,#7B5EFF);box-shadow:0 4px 14px rgba(123,94,255,.35);}
   .invite-banner-btn.travel:hover{box-shadow:0 6px 20px rgba(123,94,255,.45);}
 
+  /* REVIEW BANNER (긴 상자형 버튼) */
+  .review-banner-btn{width:100%;padding:16px;border:none;border-radius:var(--radius);font-size:15px;font-weight:800;color:#fff;cursor:pointer;background:linear-gradient(135deg,#FF8FC1,#FFB385);box-shadow:0 4px 14px rgba(255,143,193,.35);margin-top:16px;transition:all .2s;}
+  .review-banner-btn:hover{transform:translateY(-2px);box-shadow:0 6px 20px rgba(255,143,193,.45);}
+
   /* MEMBERS */
   .members-section{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-card);margin-bottom:16px;}
   .members-section-title{font-size:13px;font-weight:800;color:#888;margin-bottom:10px;}
@@ -2424,11 +2437,14 @@ function updateAllStatusBadges(){
 
   /* ARCHIVED / 지난 여행 읽기전용 */
   .archived-banner{background:#FFF3D6;border:2px solid #FFE0A0;border-radius:var(--radius-sm);padding:12px 14px;font-size:12px;color:#B8860B;line-height:1.6;margin-bottom:16px;font-weight:600;}
+  .archived-banner-btn{display:block;margin-top:8px;background:#fff;border:none;border-radius:50px;padding:8px 14px;font-size:12px;font-weight:700;color:#FF8C42;cursor:pointer;}
+  .archived-banner-btn:hover{background:#FFF8F2;}
   body.readonly-mode .add-card-btn,
   body.readonly-mode .acc-actions,
   body.readonly-mode .add-item-row,
   body.readonly-mode .member-kick-btn,
   body.readonly-mode .invite-banner-btn,
+  body.readonly-mode .review-banner-btn,
   body.readonly-mode .del-check,
   body.readonly-mode .drag-handle,
   body.readonly-mode #sub-info .tag-input-wrap,
@@ -2453,6 +2469,8 @@ function updateAllStatusBadges(){
   }
   [data-theme="dark"] .end-trip-btn{background:rgba(46,158,91,.12);border-color:rgba(46,158,91,.4);color:#7be0a8;}
   [data-theme="dark"] .archived-banner{background:rgba(255,224,160,.12);border-color:rgba(255,224,160,.3);color:#ffd98a;}
+  [data-theme="dark"] .archived-banner-btn{background:rgba(255,255,255,.1);color:#d3b8ff;}
+  [data-theme="dark"] .review-banner-btn{background:linear-gradient(135deg,#ff6ec7,#a855f7);box-shadow:0 4px 14px rgba(168,85,247,.35);}
 
   /* TOGGLE SWITCH */
   .toggle-row{display:flex;align-items:center;justify-content:space-between;background:#FFF8F2;border-radius:var(--radius-sm);padding:12px 14px;font-size:13px;color:#666;font-weight:600;}
@@ -2618,6 +2636,7 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .review-card{background:rgba(255,255,255,.8);}
   [data-theme="summer"] .review-author{color:#2E7FD9;}
   [data-theme="summer"] .review-comment-input-row button{background:linear-gradient(135deg,#4A90D9,#FF8FC1);}
+  [data-theme="summer"] .review-banner-btn{background:linear-gradient(135deg,#FF8FC1,#4A90D9);}
   [data-theme="summer"] .review-filter-btn.active,[data-theme="summer"] .pick-btn.selected{background:#4A90D9;border-color:#4A90D9;}
   [data-theme="summer"] .overall-review-section{background:rgba(255,255,255,.8);}
 </style>
@@ -2829,7 +2848,10 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="archived-banner" style="display:none;">📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 트레블 모드에서 계속 남길 수 있어요!</div>
+    <div class="archived-banner" style="display:none;">
+      📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 계속 남길 수 있어요!
+      <button class="archived-banner-btn" onclick="playSound('pop');switchMode('travel');showSub('sub-travel-review')">📸 리뷰로 돌아가기</button>
+    </div>
     <button class="invite-banner-btn" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
     <div class="members-section">
       <div class="members-section-title">👥 참여 중인 멤버</div>
@@ -3091,7 +3113,10 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="archived-banner" style="display:none;">📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 계속 남길 수 있어요!</div>
+    <div class="archived-banner" style="display:none;">
+      📦 지난 여행 (읽기 전용) — 더 이상 수정할 수 없어요. 리뷰는 계속 남길 수 있어요!
+      <button class="archived-banner-btn" onclick="playSound('pop');showSub('sub-travel-review')">📸 리뷰로 돌아가기</button>
+    </div>
     <button class="invite-banner-btn travel" onclick="playSound('pop');openShareModal()">👥 코드 &amp; 친구초대</button>
     <div class="members-section">
       <div class="members-section-title">👥 참여 중인 멤버</div>
@@ -3103,11 +3128,11 @@ function updateAllStatusBadges(){
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-memo')"><div class="card-icon">📝</div><div class="card-label">메모</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-schedule')"><div class="card-icon">📅</div><div class="card-label">오늘 일정</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-pack')"><div class="card-icon">🎒</div><div class="card-label">준비물 체크</div></div>
-      <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-review')"><div class="card-icon">📸</div><div class="card-label">여행 리뷰</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-acc')"><div class="card-icon">🏨</div><div class="card-label">확정 숙소</div></div>
       <div class="menu-card travel-card" onclick="playSound('coin');showSub('sub-travel-random')"><div class="card-icon">🎲</div><div class="card-label">놀거리 뽑기</div><div class="card-status">랜덤 추첨!</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
     </div>
+    <button class="review-banner-btn" onclick="playSound('pop');showSub('sub-travel-review')">📸 여행 리뷰 보러가기</button>
     <button class="end-trip-btn host-only-end" style="display:none;" onclick="openEndTripConfirm()">🏁 여행 끝내기 (방장 전용)</button>
   </div>
 </div>
@@ -3244,7 +3269,7 @@ function updateAllStatusBadges(){
     </div>
   </div>
   <div class="main-content">
-    <div class="sub-header"><button class="back-btn travel" onclick="showMain('travel')">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div></div>
+    <div class="sub-header"><button class="back-btn travel" onclick="backFromReview()">← 뒤로</button><div class="sub-page-title">📸 여행 리뷰</div></div>
     <div class="overall-review-section">
       <div class="members-section-title">📝 멤버별 여행 총평</div>
       <div id="overall-review-list"></div>
@@ -3256,7 +3281,7 @@ function updateAllStatusBadges(){
     <button class="btn-main btn-orange" style="width:100%;margin-bottom:16px;" onclick="openReviewModal()">✏️ 리뷰 작성하기</button>
     <div class="review-filter-tabs" id="review-filter-tabs"></div>
     <div id="review-feed"></div>
-    <button class="btn-main btn-outline" style="width:100%;margin-top:20px;" onclick="playSound('pop');showMain('travel')">🔍 프로젝트 상세 보기 (플래닝/트레블 메뉴)</button>
+    <button class="btn-main btn-outline detail-view-btn" style="width:100%;margin-top:20px;display:none;" onclick="playSound('pop');showMain('travel')">🔍 프로젝트 상세 보기 (플래닝/트레블 메뉴)</button>
   </div>
 </div>
 
