@@ -127,6 +127,11 @@ function sanitizeProject(p) {
   ['members','themes'].forEach(f => {
     p[f] = p[f].filter(x => typeof x === 'string');
   });
+  // budget: 예전엔 자유 텍스트(문자열)였지만 지금은 항목별 숫자 객체예요.
+  // 이전 데이터(문자열)는 호환을 위해 etc 항목에 참고용으로 남겨두지 않고 비워둬요.
+  if(!p.budget || typeof p.budget !== 'object' || Array.isArray(p.budget)) {
+    p.budget = {};
+  }
   p.accommodations.forEach(a => {
     a.notes = toArr(a.notes).filter(x => typeof x === 'string');
     a.photos = toArr(a.photos).filter(x => typeof x === 'string');
@@ -721,6 +726,63 @@ function detachTypingListener() {
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+
+// ══ 금액 포맷팅 (숫자만 입력 → "11만 5천원" 식으로 보기 편하게 표시) ══
+// 115000 -> "11만 5천원" / 50000 -> "5만원" / 1234 -> "1,234원" / 0 또는 빈값 -> ""
+function formatKRW(n){
+  n = Math.round(Number(n)||0);
+  if(!n) return '';
+  const eok = Math.floor(n / 100000000);
+  const man = Math.floor((n % 100000000) / 10000);
+  const rest = n % 10000;
+  let parts = [];
+  if(eok) parts.push(`${eok}억`);
+  if(man) parts.push(`${man}만`);
+  if(rest) {
+    if(rest >= 1000) {
+      // 1,000~9,999: "X천 Y백" 식으로 한글화 (예: 5000 -> 5천, 5400 -> 5천 4백)
+      const cheon = Math.floor(rest / 1000);
+      const baekRemainder = rest % 1000;
+      let restParts = [`${cheon}천`];
+      if(baekRemainder >= 100) restParts.push(`${Math.floor(baekRemainder/100)}백`);
+      const under100 = baekRemainder % 100;
+      if(under100) restParts.push(under100.toLocaleString('ko-KR'));
+      parts.push(restParts.join(' '));
+    } else {
+      parts.push(rest.toLocaleString('ko-KR'));
+    }
+  }
+  if(!parts.length) parts.push('0');
+  return parts.join(' ') + '원';
+}
+// 숙소 가격을 "총 X박 Y원 (1박당 Z원)" 형식으로. nights가 1이면 "1박 Y원"만 표시.
+function formatAccPrice(price, nights){
+  price = Number(price)||0;
+  nights = Math.max(1, Number(nights)||1);
+  if(!price) return '-';
+  if(nights<=1) return `${formatKRW(price)} (1박)`;
+  return `${formatKRW(price)} (${nights}박, 1박당 ${formatKRW(Math.round(price/nights))})`;
+}
+// 입력칸을 숫자만 입력 가능하게 만들고, 옆의 미리보기 엘리먼트에 formatKRW 결과를 실시간 표시.
+// 저장된 값은 항상 순수 숫자 문자열(원 단위)이에요.
+function setupMoneyInput(inputId, previewId, afterUpdate){
+  const input = document.getElementById(inputId);
+  const preview = previewId ? document.getElementById(previewId) : null;
+  if(!input) return;
+  const update = () => {
+    const digits = input.value.replace(/[^0-9]/g,'');
+    if(input.value !== digits) input.value = digits;
+    if(afterUpdate) { afterUpdate(); }
+    else if(preview) { preview.textContent = digits ? '💬 ' + formatKRW(digits) : ''; }
+  };
+  input.addEventListener('input', update);
+  update();
+}
+function getMoneyValue(inputId){
+  const el = document.getElementById(inputId);
+  return el ? (el.value.replace(/[^0-9]/g,'') || '') : '';
+}
+
 function attachChatListener(code) {
   detachChatListener();
   if(!code) return;
@@ -884,7 +946,9 @@ const SCREEN_GUIDES = {
   'sub-info': {
     title: '📋 기본 정보 - 이용방법',
     sections: [
-      ['✏️ 무엇을 입력하나요?', '여행 이름, 장소, 시작일/종료일, 이동수단, 예산을 입력해요. 모두 선택사항이니 아는 만큼만 채워도 괜찮아요.'],
+      ['✏️ 무엇을 입력하나요?', '여행 이름, 장소, 시작일/종료일, 이동수단을 입력해요. 모두 선택사항이니 아는 만큼만 채워도 괜찮아요.'],
+      ['👥 구성원 인원수', '구성원을 추가하면 자동으로 인원수가 표시돼요 (예: "👥 총 4명"). 이 인원수는 예산의 인당/총 금액 계산에 사용돼요.'],
+      ['💰 예산 입력하기', '식비·교통비·숙소비·활동비·기타 항목별로 <b>인당</b> 또는 <b>총</b> 금액 중 하나만 입력하면, 구성원 인원수를 기준으로 다른 한쪽이 자동으로 계산돼요 (예: 인당 25,000원 입력 → 4명이면 총 100,000원이 자동으로 채워져요). 숫자만 입력하면 "11만 5천원" 같은 보기 편한 형식으로 표시되고, 전체 합계가 맨 아래 "총 예산"에 인당/총 금액 모두 표시돼요.'],
       ['🏷️ 멤버 / 테마 추가하기', '입력칸에 이름이나 테마를 적고 <b>+ 버튼</b>(또는 엔터)을 누르면 태그로 추가돼요. 태그를 눌러서 삭제할 수도 있어요.'],
       ['💾 저장하기', '다 입력했으면 맨 아래 <b>"저장 & 공유하기"</b> 버튼을 눌러야 모든 멤버에게 실시간으로 공유돼요.']
     ]
@@ -892,7 +956,8 @@ const SCREEN_GUIDES = {
   'sub-acc': {
     title: '🏨 숙소 리스트 - 이용방법',
     sections: [
-      ['➕ 숙소 추가하기', '<b>"+ 숙소 추가하기"</b> 버튼을 눌러 이름, 1박 가격, 예약 사이트 링크, 특이사항(최대 5개), 사진을 등록할 수 있어요.'],
+      ['➕ 숙소 추가하기', '<b>"+ 숙소 추가하기"</b> 버튼을 눌러 이름, 숙박 일수 + 총 가격(숫자만 입력하면 "11만 5천원" 형식으로 자동 표시되고, 1박당 가격도 함께 계산돼요. 예: 2박 150,000원 → 1박당 75,000원), 예약 사이트 링크, 특이사항(최대 5개), 사진을 등록할 수 있어요.'],
+      ['💰 예산 대비 비교', '기본 정보에서 🏨숙소비 예산을 입력해두면, 각 숙소 카드와 비교표에 예산보다 얼마나 초과/절약되는지 자동으로 표시돼요.'],
       ['↕️ 순서 바꾸기', '숙소 카드를 길게 눌러 드래그하면 순서를 바꿀 수 있어요. 위에 있을수록 우선순위가 높다는 뜻으로 활용해보세요.'],
       ['✅ 확정하기', '카드의 <b>"확정"</b> 버튼을 누르면 이 숙소가 트레블 모드의 <b>🏨 확정 숙소</b> 화면에 표시돼요. 여러 곳을 비교하다 마음에 드는 곳이 생기면 확정해보세요!'],
       ['🆚 비교하고 싶다면', '숙소가 2개 이상이면 <b>🆚 숙소 비교</b> 메뉴에서 표로 비교하거나, 이상형 월드컵으로 투표해서 정할 수 있어요.']
@@ -1331,7 +1396,7 @@ window.createProject = async function() {
     place:'', members:[], transport:'', themes:[],
     accommodations:[], funList:[], schedule:[],
     memo:'', packList:[], outfit:'', outfitMemo:'',
-    budget:'', hostUid: currentUser ? currentUser.uid : null
+    budget:{}, hostUid: currentUser ? currentUser.uid : null
   };
   try {
     await set(ref(db, 'projects/' + code), newProject);
@@ -1372,7 +1437,8 @@ function refreshInfoBar() {
   setText('ib-members', (project.members||[]).join(', ')||'구성원 미정');
   setText('ib-transport', project.transport||'이동수단 미정');
   setText('ib-theme', (project.themes||[]).join(' · ')||'테마 미정');
-  setText('ib-budget', project.budget||'예산 미정');
+  const budgetTotal = getBudgetTotal(project.budget);
+  setText('ib-budget', budgetTotal ? formatKRW(budgetTotal)+' (총)' : '예산 미정');
 }
 function refreshTravelInfoBar() {
   if(!project) return;
@@ -1454,24 +1520,93 @@ window.addTagBtn = function(key,inputId) {
   const inp=document.getElementById(inputId);
   const v=inp.value.trim(); if(!v) return;
   tagData[key].push(v); inp.value=''; renderTags(key);
+  if(key==='members') updateMemberCountDisplay();
 }
 function renderTags(key) {
   const list=document.getElementById('tag-'+key);
   if(!list) return;
   list.innerHTML=tagData[key].map((t,i)=>`<div class="tag">${t}<span class="rm" onclick="removeTag('${key}',${i})">×</span></div>`).join('');
 }
-window.removeTag=function(key,i){ tagData[key].splice(i,1); renderTags(key); }
+window.removeTag=function(key,i){
+  tagData[key].splice(i,1); renderTags(key);
+  if(key==='members') updateMemberCountDisplay();
+}
+function getMemberCount(){
+  return Math.max(1, (tagData.members||[]).length || 1);
+}
+function updateMemberCountDisplay(){
+  const el = document.getElementById('member-count-display');
+  const count = (tagData.members||[]).length;
+  if(el) el.textContent = count ? `👥 총 ${count}명` : '👥 구성원을 추가하면 인원수가 표시돼요';
+  updateBudgetTotalDisplay();
+}
 
+const BUDGET_CATEGORIES = [
+  {key:'food', label:'🍜 식비'},
+  {key:'transport', label:'🚌 교통비'},
+  {key:'stay', label:'🏨 숙소비'},
+  {key:'activity', label:'🎡 활동/놀거리'},
+  {key:'etc', label:'🛍️ 기타'}
+];
+function getBudgetTotal(budget){
+  if(!budget) return 0;
+  return BUDGET_CATEGORIES.reduce((sum,c) => sum + (Number(budget[c.key])||0), 0);
+}
+// 각 예산 항목은 "총액"만 저장하지만, 입력 화면에서는 인당/총 금액 칸을 서로
+// 자동 변환해줘요 (인당 입력 -> 총 = 인당 × 인원수, 총 입력 -> 인당 = 총 ÷ 인원수).
+function wireBudgetCategoryInputs(key){
+  const totalInput = document.getElementById('budget-'+key);
+  const perInput = document.getElementById('budget-'+key+'-per');
+  const preview = document.getElementById('budget-'+key+'-preview');
+  if(!totalInput || !perInput) return;
+  const updatePreview = () => {
+    const total = Number(totalInput.value)||0;
+    const per = Number(perInput.value)||0;
+    if(preview) preview.textContent = (total||per) ? `💬 총 ${formatKRW(total)} · 인당 ${formatKRW(per)}` : '';
+  };
+  totalInput.oninput = () => {
+    const digits = totalInput.value.replace(/[^0-9]/g,'');
+    totalInput.value = digits;
+    const count = getMemberCount();
+    perInput.value = digits ? Math.round(Number(digits)/count) : '';
+    updatePreview();
+    updateBudgetTotalDisplay();
+  };
+  perInput.oninput = () => {
+    const digits = perInput.value.replace(/[^0-9]/g,'');
+    perInput.value = digits;
+    const count = getMemberCount();
+    totalInput.value = digits ? Math.round(Number(digits)*count) : '';
+    updatePreview();
+    updateBudgetTotalDisplay();
+  };
+  updatePreview();
+}
 function loadBasicInfo() {
   if(!project) return;
   setValue('f-place',project.place||'');
   setValue('f-start',project.start||'');
   setValue('f-end',project.end||'');
   setValue('f-transport',project.transport||'');
-  setValue('f-budget',project.budget||'');
   tagData.members=[...(project.members||[])];
   tagData.themes=[...(project.themes||[])];
   renderTags('members'); renderTags('themes');
+  updateMemberCountDisplay();
+  const budget = (project.budget && typeof project.budget==='object') ? project.budget : {};
+  const count = getMemberCount();
+  BUDGET_CATEGORIES.forEach(c => {
+    const total = budget[c.key] ? Number(budget[c.key]) : '';
+    setValue('budget-'+c.key, total);
+    setValue('budget-'+c.key+'-per', total ? Math.round(total/count) : '');
+    wireBudgetCategoryInputs(c.key);
+  });
+  updateBudgetTotalDisplay();
+}
+function updateBudgetTotalDisplay(){
+  const total = BUDGET_CATEGORIES.reduce((sum,c) => sum + (Number(getMoneyValue('budget-'+c.key))||0), 0);
+  const count = getMemberCount();
+  const el = document.getElementById('budget-total-display');
+  if(el) el.textContent = total ? `총 ${formatKRW(total)} · 인당 ${formatKRW(Math.round(total/count))}` : '0원';
 }
 function setValue(id,v){ const el=document.getElementById(id); if(el) el.value=v; }
 
@@ -1481,7 +1616,9 @@ window.saveBasicInfo = async function() {
   project.start=document.getElementById('f-start').value;
   project.end=document.getElementById('f-end').value;
   project.transport=document.getElementById('f-transport').value;
-  project.budget=document.getElementById('f-budget').value;
+  const budget = {};
+  BUDGET_CATEGORIES.forEach(c => { budget[c.key] = getMoneyValue('budget-'+c.key); });
+  project.budget = budget;
   project.members=[...tagData.members];
   project.themes=[...tagData.themes];
   playSound('save');
@@ -1497,23 +1634,33 @@ window.saveBasicInfo = async function() {
 window.openAccModal = function(idx) {
   editingAccIdx = idx!=null ? idx : null;
   accTempNotes=[]; accTempPhotos=[];
-  setValue('acc-name',''); setValue('acc-price',''); setValue('acc-link','');
+  setValue('acc-name',''); setValue('acc-price',''); setValue('acc-nights','1'); setValue('acc-link','');
   document.getElementById('acc-note-tags').innerHTML='';
   document.getElementById('acc-photo-list').innerHTML='';
   setValue('acc-photo-url','');
   setText('acc-photo-status','');
   if(idx!=null) {
     const a=project.accommodations[idx];
-    setValue('acc-name',a.name); setValue('acc-price',a.price||''); setValue('acc-link',a.link||'');
+    setValue('acc-name',a.name); setValue('acc-price',a.price||''); setValue('acc-nights',a.nights||1); setValue('acc-link',a.link||'');
     accTempNotes=[...a.notes]; accTempPhotos=[...(a.photos||[])];
     renderAccNoteTags(); renderAccPhotoList();
   }
+  setupMoneyInput('acc-price','acc-price-preview', updateAccPricePreview);
+  updateAccPricePreview();
+  document.getElementById('acc-nights').oninput = updateAccPricePreview;
   setupImageFileInput('acc-photo-file', 'acc-photo-status', (url) => {
     if(accTempPhotos.length>=8){ showToast('사진은 최대 8개!'); return; }
     accTempPhotos.push(url); renderAccPhotoList();
     showToast('✅ 사진 업로드 완료!');
   });
   document.getElementById('modal-acc').classList.remove('hidden');
+}
+function updateAccPricePreview(){
+  const price = Number(getMoneyValue('acc-price'))||0;
+  const nights = Math.max(1, Number(document.getElementById('acc-nights').value)||1);
+  const preview = document.getElementById('acc-price-preview');
+  if(!preview) return;
+  preview.textContent = price ? `💬 총 ${nights}박 ${formatKRW(price)} (1박당 ${formatKRW(Math.round(price/nights))})` : '';
 }
 window.addAccNote=function(e){ if(e.key==='Enter') window.addAccNoteBtn(); }
 window.addAccNoteBtn=function(){
@@ -1545,7 +1692,8 @@ window.saveAccommodation = async function() {
   if(isProjectReadOnly()) return;
   const name=document.getElementById('acc-name').value.trim();
   if(!name){ showToast('숙소 이름을 입력해주세요!'); return; }
-  const acc={ name, price:document.getElementById('acc-price').value, link:document.getElementById('acc-link').value, notes:[...accTempNotes], photos:[...accTempPhotos], confirmed:false };
+  const nights = Math.max(1, Number(document.getElementById('acc-nights').value)||1);
+  const acc={ name, price:getMoneyValue('acc-price'), nights, link:document.getElementById('acc-link').value, notes:[...accTempNotes], photos:[...accTempPhotos], confirmed:false };
   if(!project.accommodations) project.accommodations=[];
   if(editingAccIdx!=null) { acc.confirmed=project.accommodations[editingAccIdx].confirmed; project.accommodations[editingAccIdx]=acc; }
   else project.accommodations.push(acc);
@@ -1553,18 +1701,34 @@ window.saveAccommodation = async function() {
   closeModal('modal-acc'); renderAccList(); updateStatusBadge('acc');
 }
 
+// 숙소비 예산(기본정보에서 입력한 🏨숙소비 총액)과 실제 가격을 비교해서
+// 초과/절약 여부를 보여주는 뱃지를 만들어줘요.
+function getStayBudget(){
+  return Number((project.budget && project.budget.stay) || 0);
+}
+function getBudgetDiffBadge(price){
+  const budget = getStayBudget();
+  if(!budget || !price) return '';
+  const diff = Number(price) - budget;
+  if(diff === 0) return `<span class="budget-diff-badge exact">🎯 예산과 동일</span>`;
+  if(diff > 0) return `<span class="budget-diff-badge over">🔺 예산보다 ${formatKRW(diff)} 초과</span>`;
+  return `<span class="budget-diff-badge under">🔻 예산보다 ${formatKRW(-diff)} 절약</span>`;
+}
 function renderAccList(){
   const list=document.getElementById('acc-list');
   if(!project.accommodations||!project.accommodations.length){ list.innerHTML='<div style="text-align:center;color:#bbb;padding:20px;">아직 등록된 숙소가 없어요 🏨</div>'; return; }
-  list.innerHTML=project.accommodations.map((a,i)=>`
+  const stayBudget = getStayBudget();
+  const budgetBanner = stayBudget ? `<div class="budget-context-banner">🏨 설정된 숙소비 예산: <b>${formatKRW(stayBudget)}</b> (기본 정보에서 변경 가능)</div>` : '';
+  list.innerHTML=budgetBanner+project.accommodations.map((a,i)=>`
     <div class="acc-card ${a.confirmed?'confirmed':''}" draggable="true" ondragstart="dragAcc(${i})" ondragover="event.preventDefault()" ondrop="dropAcc(event,${i})">
       <div style="display:flex;gap:6px;align-items:flex-start;">
         <span class="drag-handle">⠿</span>
         <div style="flex:1">
           <div class="acc-card-header">
             <div class="acc-card-title">${a.confirmed?'✅ ':''} ${a.name}</div>
-            <div class="acc-card-price">${a.price||'-'}</div>
+            <div class="acc-card-price">${a.price?formatAccPrice(a.price,a.nights):'-'}</div>
           </div>
+          ${getBudgetDiffBadge(a.price)}
           ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
           ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
           ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
@@ -1800,11 +1964,21 @@ function renderCompare(){
   document.querySelectorAll('.compare-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab===compareTab));
   if(compareTab==='worldcup') { renderWorldcup(el); return; }
   if(!project.accommodations||!project.accommodations.length){ el.innerHTML='<div style="text-align:center;color:#bbb;padding:30px;">등록된 숙소가 없어요 🏨</div>'; return; }
-  el.innerHTML=`<div style="overflow-x:auto;"><table class="compare-table">
-    <thead><tr><th>숙소명</th><th>가격</th><th>특이사항</th><th>링크</th></tr></thead>
+  const stayBudget = getStayBudget();
+  const budgetBanner = stayBudget ? `<div class="budget-context-banner">🏨 설정된 숙소비 예산: <b>${formatKRW(stayBudget)}</b></div>` : '';
+  function diffCell(price){
+    if(!stayBudget || !price) return '-';
+    const diff = Number(price) - stayBudget;
+    if(diff === 0) return `<span class="budget-diff-text exact">동일</span>`;
+    if(diff > 0) return `<span class="budget-diff-text over">+${formatKRW(diff)}</span>`;
+    return `<span class="budget-diff-text under">-${formatKRW(-diff)}</span>`;
+  }
+  el.innerHTML=budgetBanner+`<div style="overflow-x:auto;"><table class="compare-table">
+    <thead><tr><th>숙소명</th><th>가격</th>${stayBudget?'<th>예산 대비</th>':''}<th>특이사항</th><th>링크</th></tr></thead>
     <tbody>${project.accommodations.map(a=>`<tr>
       <td style="font-weight:700;text-align:left;">${a.confirmed?'✅ ':''} ${a.name}</td>
-      <td>${a.price||'-'}</td>
+      <td>${a.price?formatAccPrice(a.price,a.nights):'-'}</td>
+      ${stayBudget?`<td>${diffCell(a.price)}</td>`:''}
       <td style="text-align:left;">${(a.notes||[]).slice(0,3).join(', ')||'-'}</td>
       <td>${a.link?`<a href="${a.link}" target="_blank" style="color:#4A90D9;">링크</a>`:'-'}</td>
     </tr>`).join('')}</tbody></table></div>`;
@@ -2132,14 +2306,19 @@ function renderTravelSummary(){
   const el=document.getElementById('travel-summary-content');
   const p=project;
   const confirmed=(p.accommodations||[]).find(a=>a.confirmed);
+  const budgetTotal = getBudgetTotal(p.budget);
+  const budgetLines = BUDGET_CATEGORIES.map(c => {
+    const v = Number((p.budget||{})[c.key])||0;
+    return v ? `<div class="budget-line">${c.label}: ${formatKRW(v)}</div>` : '';
+  }).join('');
   el.innerHTML=`
     <div class="confirmed-display"><div class="confirmed-label">📅 여행 기간</div><div class="confirmed-value">${p.start||'미정'} ${p.end?'~ '+p.end:''}</div></div>
     <div class="confirmed-display"><div class="confirmed-label">📍 여행지</div><div class="confirmed-value">${p.place||'미정'}</div></div>
     <div class="confirmed-display"><div class="confirmed-label">👥 구성원</div><div class="confirmed-value">${(p.members||[]).join(', ')||'미정'}</div></div>
     <div class="confirmed-display"><div class="confirmed-label">🚗 이동수단</div><div class="confirmed-value">${p.transport||'미정'}</div></div>
     <div class="confirmed-display"><div class="confirmed-label">🎨 여행 테마</div><div class="confirmed-value">${(p.themes||[]).join(' · ')||'미정'}</div></div>
-    <div class="confirmed-display"><div class="confirmed-label">💰 예산</div><div class="confirmed-value">${p.budget||'미정'}</div></div>
-    <div class="confirmed-display"><div class="confirmed-label">🏨 확정 숙소</div><div class="confirmed-value">${confirmed?confirmed.name:'미확정'}</div>${confirmed&&confirmed.price?`<div class="confirmed-sub">💰 ${confirmed.price}</div>`:''}</div>
+    <div class="confirmed-display"><div class="confirmed-label">💰 예산</div><div class="confirmed-value">${budgetTotal?formatKRW(budgetTotal)+' (총)':'미정'}</div>${budgetLines?`<div class="confirmed-sub">${budgetLines}</div>`:''}</div>
+    <div class="confirmed-display"><div class="confirmed-label">🏨 확정 숙소</div><div class="confirmed-value">${confirmed?confirmed.name:'미확정'}</div>${confirmed&&confirmed.price?`<div class="confirmed-sub">💰 ${formatKRW(confirmed.price)}</div>`:''}</div>
     <div class="confirmed-display"><div class="confirmed-label">👗 옷차림 컨셉</div><div class="confirmed-value">${p.outfit||'미정'}</div><div class="confirmed-sub">${p.outfitMemo||''}</div></div>`;
 }
 function renderTravelSchedule(){
@@ -2181,8 +2360,9 @@ function renderTravelAcc(){
     <div class="acc-card travel-confirmed">
       <div class="acc-card-header">
         <div class="acc-card-title">✅ ${a.name}</div>
-        <div class="acc-card-price travel">${a.price||''}</div>
+        <div class="acc-card-price travel">${a.price?formatAccPrice(a.price,a.nights):''}</div>
       </div>
+      ${getBudgetDiffBadge(a.price)}
       ${a.link?`<a class="acc-card-link" href="${a.link}" target="_blank">🔗 예약 사이트</a>`:''}
       ${(a.notes||[]).length?`<div class="acc-notes">${a.notes.map(n=>`<span class="acc-note-tag">📌 ${n}</span>`).join('')}</div>`:''}
       ${(a.photos||[]).length?`<div class="acc-photos">${a.photos.map(p=>`<div class="acc-photo" onclick="openImageView(this.querySelector('img').src)"><img src="${p}" onerror="this.parentElement.style.display='none'"></div>`).join('')}</div>`:''}
@@ -2595,6 +2775,31 @@ function updateAllStatusBadges(){
   .form-row{display:flex;gap:10px;}
   .form-row .form-group{flex:1;}
   .code-hint{text-align:center;font-size:12px;color:#bbb;margin-bottom:20px;}
+
+  /* 예산 세부 입력 */
+  .budget-grid{display:flex;flex-direction:column;gap:10px;}
+  .budget-item label{font-size:12px;font-weight:600;color:#999;margin-bottom:4px;display:block;}
+  .budget-item input{width:100%;padding:10px 14px;border:2px solid #FFE0C8;border-radius:var(--radius-sm);font-size:14px;outline:none;font-family:inherit;}
+  .budget-item input:focus{border-color:#FF8C42;}
+  .budget-preview{font-size:12px;color:#FF8C42;font-weight:700;margin-top:4px;min-height:16px;}
+  .budget-total-row{display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding:14px 16px;background:#FFF3E8;border-radius:var(--radius-sm);font-size:14px;font-weight:700;color:#666;}
+  .budget-total-row span:last-child{font-size:17px;font-weight:800;color:#FF8C42;}
+  .budget-line{font-size:12px;color:#999;}
+
+  /* 숙소비 예산 대비 초과/절약 표시 */
+  .budget-context-banner{background:#FFF3E8;border-radius:var(--radius-sm);padding:10px 14px;font-size:12px;color:#999;margin-bottom:12px;}
+  .budget-diff-badge{display:inline-block;margin-top:6px;font-size:11px;font-weight:700;border-radius:50px;padding:3px 10px;}
+  .budget-diff-badge.over{background:#FFE5E5;color:#e74c3c;}
+  .budget-diff-badge.under{background:#E5F7ED;color:#2E9E5B;}
+  .budget-diff-badge.exact{background:#FFF3E8;color:#FF8C42;}
+  .budget-diff-text{font-weight:700;}
+  .budget-diff-text.over{color:#e74c3c;}
+  .budget-diff-text.under{color:#2E9E5B;}
+  .budget-diff-text.exact{color:#FF8C42;}
+  .member-count-badge{display:inline-block;margin-top:8px;background:#FFF3E8;color:#FF8C42;border-radius:50px;padding:5px 12px;font-size:12px;font-weight:700;}
+  .budget-dual-row{display:flex;gap:8px;}
+  .budget-dual-col{flex:1;}
+  .budget-dual-label{font-size:11px;color:#bbb;display:block;margin-bottom:3px;}
 
   /* HEADER */
   .app-header{background:#fff;padding:0 16px;box-shadow:0 2px 12px rgba(255,140,66,.1);position:sticky;top:0;z-index:100;}
@@ -3101,9 +3306,19 @@ function updateAllStatusBadges(){
   [data-theme="dark"] .host-badge{color:#c9a8ff;}
   [data-theme="dark"] .member-kick-btn{color:#6b5a8a;}
   [data-theme="dark"] .member-kick-btn:hover{color:#ff8f8f;}
-  [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .add-item-row select,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input{
+  [data-theme="dark"] .form-group input,[data-theme="dark"] .form-group select,[data-theme="dark"] .form-group textarea,[data-theme="dark"] .add-item-row input,[data-theme="dark"] .add-item-row select,[data-theme="dark"] .photo-url-row input,[data-theme="dark"] .invite-row input,[data-theme="dark"] .memo-textarea,[data-theme="dark"] .chat-input-row input,[data-theme="dark"] .budget-item input{
     background:rgba(255,255,255,.06);color:#eee;border-color:rgba(155,77,255,.35);
   }
+  [data-theme="dark"] .budget-total-row{background:rgba(155,77,255,.12);color:#cbb8e6;}
+  [data-theme="dark"] .budget-total-row span:last-child{color:#c9a8ff;}
+  [data-theme="dark"] .budget-preview{color:#c9a8ff;}
+  [data-theme="dark"] .member-count-badge{background:rgba(155,77,255,.18);color:#d3b8ff;}
+  [data-theme="dark"] .budget-context-banner{background:rgba(155,77,255,.12);color:#b8a8d8;}
+  [data-theme="dark"] .budget-diff-badge.over{background:rgba(255,94,94,.18);color:#ff9a9a;}
+  [data-theme="dark"] .budget-diff-badge.under{background:rgba(46,158,91,.18);color:#7be0a8;}
+  [data-theme="dark"] .budget-diff-badge.exact{background:rgba(155,77,255,.18);color:#c9a8ff;}
+  [data-theme="dark"] .budget-diff-text.exact{color:#c9a8ff;}
+  [data-theme="dark"] .budget-dual-label{color:#8d7caa;}
   [data-theme="dark"] .schedule-item-transport{background:rgba(155,77,255,.12);}
   [data-theme="dark"] .schedule-item-transport .schedule-text{color:#c9a8ff;}
   [data-theme="dark"] .schedule-location-tag{background:rgba(255,255,255,.08);color:#ffb385;}
@@ -3191,6 +3406,13 @@ function updateAllStatusBadges(){
   [data-theme="summer"] .review-author{color:#2E7FD9;}
   [data-theme="summer"] .review-comment-input-row button{background:linear-gradient(135deg,#4A90D9,#FF8FC1);}
   [data-theme="summer"] .review-banner-btn{background:linear-gradient(135deg,#FF8FC1,#4A90D9);}
+  [data-theme="summer"] .budget-total-row{background:rgba(74,144,217,.1);color:#2E7FD9;}
+  [data-theme="summer"] .budget-total-row span:last-child{color:#2E7FD9;}
+  [data-theme="summer"] .budget-preview{color:#2E7FD9;}
+  [data-theme="summer"] .member-count-badge{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .budget-context-banner{background:rgba(74,144,217,.08);color:#2E7FD9;}
+  [data-theme="summer"] .budget-diff-badge.exact{background:rgba(74,144,217,.14);color:#2E7FD9;}
+  [data-theme="summer"] .budget-diff-text.exact{color:#2E7FD9;}
   [data-theme="summer"] .install-app-btn{background:rgba(74,144,217,.06);border-color:rgba(74,144,217,.4);color:#2E7FD9;}
   [data-theme="summer"] .review-filter-btn.active,[data-theme="summer"] .pick-btn.selected{background:#4A90D9;border-color:#4A90D9;}
   [data-theme="summer"] .overall-review-section{background:rgba(255,255,255,.8);}
@@ -3466,6 +3688,7 @@ function updateAllStatusBadges(){
         <label>구성원</label>
         <div class="tag-input-wrap"><input type="text" id="f-member-input" placeholder="이름 입력 후 엔터" onkeydown="addTag(event,'members','f-member-input')"><button class="acc-btn acc-btn-confirm" onclick="addTagBtn('members','f-member-input');playSound('pop')">추가</button></div>
         <div class="tag-list" id="tag-members"></div>
+        <div class="member-count-badge" id="member-count-display">👥 구성원을 추가하면 인원수가 표시돼요</div>
       </div>
       <div class="form-group"><label>이동 수단</label><select id="f-transport"><option value="">선택</option><option>✈️ 비행기</option><option>🚂 기차</option><option>🚌 버스</option><option>🚗 자동차</option><option>🚢 배</option></select></div>
       <div class="form-group">
@@ -3474,9 +3697,52 @@ function updateAllStatusBadges(){
         <div class="tag-list" id="tag-themes"></div>
       </div>
       <div class="form-group">
-        <label>💰 예산 (총 예산)</label>
-        <div style="position:relative;">
-          <input type="text" id="f-budget" placeholder="예: 50만원, 1인 30만원 등">
+        <label>💰 예산 (세부 항목별 · 인당/총 자동 변환)</label>
+        <div class="budget-grid">
+          <div class="budget-item">
+            <label>🍜 식비</label>
+            <div class="budget-dual-row">
+              <div class="budget-dual-col"><span class="budget-dual-label">인당</span><input type="text" inputmode="numeric" id="budget-food-per" placeholder="예: 25000"></div>
+              <div class="budget-dual-col"><span class="budget-dual-label">총</span><input type="text" inputmode="numeric" id="budget-food" placeholder="예: 100000"></div>
+            </div>
+            <div class="budget-preview" id="budget-food-preview"></div>
+          </div>
+          <div class="budget-item">
+            <label>🚌 교통비</label>
+            <div class="budget-dual-row">
+              <div class="budget-dual-col"><span class="budget-dual-label">인당</span><input type="text" inputmode="numeric" id="budget-transport-per" placeholder="예: 5000"></div>
+              <div class="budget-dual-col"><span class="budget-dual-label">총</span><input type="text" inputmode="numeric" id="budget-transport" placeholder="예: 20000"></div>
+            </div>
+            <div class="budget-preview" id="budget-transport-preview"></div>
+          </div>
+          <div class="budget-item">
+            <label>🏨 숙소비</label>
+            <div class="budget-dual-row">
+              <div class="budget-dual-col"><span class="budget-dual-label">인당</span><input type="text" inputmode="numeric" id="budget-stay-per" placeholder="예: 12500"></div>
+              <div class="budget-dual-col"><span class="budget-dual-label">총</span><input type="text" inputmode="numeric" id="budget-stay" placeholder="예: 50000"></div>
+            </div>
+            <div class="budget-preview" id="budget-stay-preview"></div>
+          </div>
+          <div class="budget-item">
+            <label>🎡 활동/놀거리</label>
+            <div class="budget-dual-row">
+              <div class="budget-dual-col"><span class="budget-dual-label">인당</span><input type="text" inputmode="numeric" id="budget-activity-per" placeholder="예: 7500"></div>
+              <div class="budget-dual-col"><span class="budget-dual-label">총</span><input type="text" inputmode="numeric" id="budget-activity" placeholder="예: 30000"></div>
+            </div>
+            <div class="budget-preview" id="budget-activity-preview"></div>
+          </div>
+          <div class="budget-item">
+            <label>🛍️ 기타</label>
+            <div class="budget-dual-row">
+              <div class="budget-dual-col"><span class="budget-dual-label">인당</span><input type="text" inputmode="numeric" id="budget-etc-per" placeholder="예: 2500"></div>
+              <div class="budget-dual-col"><span class="budget-dual-label">총</span><input type="text" inputmode="numeric" id="budget-etc" placeholder="예: 10000"></div>
+            </div>
+            <div class="budget-preview" id="budget-etc-preview"></div>
+          </div>
+        </div>
+        <div class="budget-total-row">
+          <span>총 예산</span>
+          <span id="budget-total-display">0원</span>
         </div>
       </div>
       <button class="save-btn" onclick="saveBasicInfo()">💾 저장 &amp; 공유하기</button>
@@ -3713,7 +3979,7 @@ function updateAllStatusBadges(){
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-travel-fun')"><div class="card-icon">🎡</div><div class="card-label">놀거리</div></div>
       <div class="menu-card travel-card" onclick="playSound('pop');showSub('sub-transport-summary')"><div class="card-icon">🚌</div><div class="card-label">교통/동선</div></div>
     </div>
-    <button class="review-banner-btn" onclick="playSound('pop');showSub('sub-travel-review')">📸 여행 리뷰 작성하기! </button>
+    <button class="review-banner-btn" onclick="playSound('pop');showSub('sub-travel-review')">📸 여행 리뷰 입력하기! </button>
     <button class="end-trip-btn host-only-end" style="display:none;" onclick="openEndTripConfirm()">🏁 여행 끝내기 (방장 전용)</button>
   </div>
 </div>
@@ -3871,7 +4137,14 @@ function updateAllStatusBadges(){
   <div class="modal">
     <h3>🏨 숙소 추가/수정 <button class="close-btn" onclick="closeModal('modal-acc')">✕</button></h3>
     <div class="form-group"><label>숙소 이름</label><input type="text" id="acc-name" placeholder="예: 도톤보리 리버사이드 호텔"></div>
-    <div class="form-group"><label>가격 (1박 기준)</label><input type="text" id="acc-price" placeholder="예: 120,000원"></div>
+    <div class="form-group">
+      <label>가격 (총액 기준)</label>
+      <div class="budget-dual-row">
+        <div class="budget-dual-col"><span class="budget-dual-label">숙박 일수</span><input type="number" min="1" id="acc-nights" value="1" placeholder="예: 2"></div>
+        <div class="budget-dual-col"><span class="budget-dual-label">총 가격</span><input type="text" inputmode="numeric" id="acc-price" placeholder="예: 150000"></div>
+      </div>
+      <div class="budget-preview" id="acc-price-preview"></div>
+    </div>
     <div class="form-group"><label>예약 사이트 링크</label><input type="url" id="acc-link" placeholder="https://..."></div>
     <div class="form-group">
       <label>특이사항 (최대 5개)</label>
